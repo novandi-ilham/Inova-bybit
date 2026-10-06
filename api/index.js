@@ -1,0 +1,47 @@
+import crypto from 'crypto';
+
+const BASE = process.env.BYBIT_BASE_URL || 'https://api.bybit.com';
+const KEY = process.env.BYBIT_API_KEY || '';
+const SECRET = process.env.BYBIT_API_SECRET || '';
+const RECV_WINDOW = String(process.env.BYBIT_RECV_WINDOW || '5000');
+const ACCOUNT_TYPE = process.env.BYBIT_ACCOUNT_TYPE || 'UNIFIED';
+const MAX_RISK_PCT = Math.min(1, Math.max(0.1, Number(process.env.MAX_RISK_PCT || 1)));
+const TRADING_TOKEN = process.env.TRADING_TOKEN || '';
+const MAX_NOTIONAL_USDT = Number(process.env.MAX_NOTIONAL_USDT || 250);
+const ALLOW_LIVE = String(process.env.ALLOW_LIVE_TRADING || 'false').toLowerCase() === 'true';
+const ALLOW_TESTNET = String(process.env.ALLOW_TESTNET_TRADING || 'false').toLowerCase() === 'true';
+const IS_TESTNET = BASE.includes('testnet');
+
+function sign(payload, ts) { return crypto.createHmac('sha256', SECRET).update(`${ts}${KEY}${RECV_WINDOW}${payload}`).digest('hex'); }
+function qsSorted(params={}) { return new URLSearchParams(Object.entries(params).filter(([,v])=>v!==undefined&&v!==null).sort(([a],[b])=>a.localeCompare(b)).map(([k,v])=>[k,String(v)])).toString(); }
+async function bybit(path,{method='GET',params={},body=null,signed=false}={}) {
+  const q=method==='GET'?qsSorted(params):''; const bodyText=method==='GET'?'':JSON.stringify(body||{}); const ts=String(Date.now());
+  const headers={'Content-Type':'application/json'};
+  if(signed){if(!KEY||!SECRET)throw new Error('Bybit API credentials belum dikonfigurasi di server.');headers['X-BAPI-API-KEY']=KEY;headers['X-BAPI-TIMESTAMP']=ts;headers['X-BAPI-RECV-WINDOW']=RECV_WINDOW;headers['X-BAPI-SIGN']=sign(method==='GET'?q:bodyText,ts);headers['X-BAPI-SIGN-TYPE']='2';}
+  const url=BASE+path+(q?`?${q}`:''); const r=await fetch(url,{method,headers,body:method==='GET'?undefined:bodyText}); const text=await r.text(); let d;try{d=JSON.parse(text)}catch{d={raw:text}};
+  if(!r.ok||Number(d?.retCode)!==0)throw new Error(d?.retMsg||`Bybit HTTP ${r.status}`); return d;
+}
+async function readBody(req){if(req.body&&typeof req.body==='object')return req.body;return await new Promise((resolve,reject)=>{let raw='';req.on('data',c=>{raw+=c;if(raw.length>100000)reject(new Error('body too large'))});req.on('end',()=>{try{resolve(raw?JSON.parse(raw):{})}catch(e){reject(e)}});req.on('error',reject)})}
+function headers(res){res.setHeader('Cache-Control','no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, s-maxage=0');res.setHeader('Pragma','no-cache');res.setHeader('Expires','0');res.setHeader('Vary','*');res.setHeader('Access-Control-Allow-Origin','*');res.setHeader('Access-Control-Allow-Headers','Content-Type,X-Trading-Token');res.setHeader('Access-Control-Allow-Methods','GET,POST,OPTIONS');res.setHeader('Content-Type','application/json; charset=utf-8')}
+function requireTrade(req){if(IS_TESTNET){if(!ALLOW_TESTNET)throw new Error('Bybit Testnet trading disabled.')}else{if(!ALLOW_LIVE)throw new Error('Live trading disabled. Aktifkan ALLOW_LIVE_TRADING=true setelah paper/testnet tervalidasi.');if(!TRADING_TOKEN)throw new Error('TRADING_TOKEN belum dikonfigurasi; live order endpoint dikunci.');if(req.headers['x-trading-token']!==TRADING_TOKEN)throw new Error('Unauthorized trading request.')}}
+function validateOrder(x){const symbol=String(x.symbol||'').toUpperCase(),side=String(x.side||'').toUpperCase(),qty=Number(x.quantity);if(!/^[A-Z0-9]{5,20}$/.test(symbol)||!['BUY','SELL'].includes(side)||!Number.isFinite(qty)||qty<=0)throw new Error('symbol, side, quantity tidak valid.');return {symbol,side,qty}}
+function category(){return 'linear'}
+
+export default async function handler(req,res){
+ headers(res);if(req.method==='OPTIONS')return res.status(204).end();
+ try{
+  const path=new URL(req.url,'https://vercel.local').pathname;const url=new URL(req.url,'https://vercel.local');
+  if(path==='/api/health'&&req.method==='GET')return res.status(200).json({ok:true,exchange:'BYBIT',category:'linear',mode:ALLOW_LIVE&&!IS_TESTNET?'live-enabled':'paper/testnet',testnet:IS_TESTNET,maxRiskPct:MAX_RISK_PCT,maxNotionalUSDT:MAX_NOTIONAL_USDT,tradingEndpointLocked:IS_TESTNET?!ALLOW_TESTNET:(!ALLOW_LIVE||!TRADING_TOKEN),time:Date.now()});
+  if(path==='/api/market/time'&&req.method==='GET')return res.status(200).json(await bybit('/v5/market/time'));
+  if(path==='/api/market/ticker'&&req.method==='GET')return res.status(200).json(await bybit('/v5/market/tickers',{params:{category:category()}}));
+  if(path==='/api/market/klines'&&req.method==='GET'){const symbol=String(url.searchParams.get('symbol')||'').toUpperCase();const limit=Math.min(150,Math.max(2,Number(url.searchParams.get('limit'))||150));if(!/^[A-Z0-9]{5,20}$/.test(symbol))return res.status(400).json({error:'symbol invalid'});return res.status(200).json(await bybit('/v5/market/kline',{params:{category:category(),symbol,interval:'15',limit}}));}
+  if(path==='/api/market/diagnostic'&&req.method==='GET'){const started=Date.now();try{const d=await bybit('/v5/market/time');return res.status(200).json({ok:true,exchange:'BYBIT',source:'VERCEL_SERVER',bybitHttp:200,serverTime:Number(d?.result?.timeSecond||0)*1000,latencyMs:Date.now()-started})}catch(e){const m=String(e?.message||e).match(/Bybit HTTP (\d+)/);return res.status(Number(m?.[1]||502)).json({ok:false,exchange:'BYBIT',source:'VERCEL_SERVER',bybitHttp:Number(m?.[1]||0)||null,error:String(e?.message||e),latencyMs:Date.now()-started})}}
+  if(path==='/api/market/realtime'&&req.method==='GET'){const symbol=String(url.searchParams.get('symbol')||'').toUpperCase();if(!/^[A-Z0-9]{5,20}$/.test(symbol))return res.status(400).json({error:'symbol invalid'});const started=Date.now();const d=await bybit('/v5/market/kline',{params:{category:'linear',symbol,interval:'15',limit:2}});const kline=d?.result?.list?.[0];if(!kline)throw new Error('Bybit realtime kline kosong');return res.status(200).json({ok:true,source:'BYBIT_LINEAR',symbol,interval:'15m',serverTime:Number(d?.time)||Date.now(),receivedAt:Date.now(),latencyMs:Date.now()-started,kline})}
+  if(path==='/api/account'&&req.method==='GET'){if(!KEY||!SECRET)return res.status(200).json({connected:false,reason:'Bybit API key not configured'});const [w,p]=await Promise.all([bybit('/v5/account/wallet-balance',{params:{accountType:ACCOUNT_TYPE,coin:'USDT'},signed:true}),bybit('/v5/position/list',{params:{category:'linear',settleCoin:'USDT',limit:200},signed:true})]);const wb=w?.result?.list?.[0]||{};const coin=wb?.coin?.[0]||{};const positions=(p?.result?.list||[]).filter(x=>Number(x.size)!==0);return res.status(200).json({connected:true,account:{walletBalance:wb.totalWalletBalance||coin.walletBalance||'0',availableBalance:wb.totalAvailableBalance||coin.availableToWithdraw||coin.walletBalance||'0',unrealizedProfit:wb.totalPerpUPL||'0'},assets:wb.coin||[],positions})}
+  if(path==='/api/exchange-info'&&req.method==='GET')return res.status(200).json(await bybit('/v5/market/instruments-info',{params:{category:'linear',symbol:String(url.searchParams.get('symbol')||'BTCUSDT').toUpperCase()}}));
+  if(path==='/api/order'&&req.method==='POST'){requireTrade(req);const x=await readBody(req);const v=validateOrder(x);const notional=v.qty*Number(x.price||0);if(x.price&&notional>MAX_NOTIONAL_USDT)return res.status(400).json({error:`Notional melebihi hard cap ${MAX_NOTIONAL_USDT} USDT.`});const body={category:'linear',symbol:v.symbol,side:v.side,orderType:x.type||'Market',qty:String(x.quantity),...(x.reduceOnly?{reduceOnly:true}:{}),...(x.price?{price:String(x.price)}:{})};return res.status(200).json(await bybit('/v5/order/create',{method:'POST',body,signed:true}))}
+  if(path==='/api/bracket-order'&&req.method==='POST'){requireTrade(req);const x=await readBody(req);const symbol=String(x.symbol||'').toUpperCase(),side=String(x.side||'').toUpperCase(),qty=String(x.quantity||''),sl=Number(x.stopPrice),tp=Number(x.takeProfitPrice);if(!symbol||!['BUY','SELL'].includes(side)||!qty||!(sl>0)||!(tp>0))return res.status(400).json({error:'symbol, side, quantity, stopPrice, takeProfitPrice wajib.'});const entry=await bybit('/v5/order/create',{method:'POST',body:{category:'linear',symbol,side,orderType:'Market',qty,takeProfit:String(tp),stopLoss:String(sl),tpslMode:'Full',tpTriggerBy:'MarkPrice',slTriggerBy:'MarkPrice'},signed:true});return res.status(200).json({entry})}
+  if(path==='/api/close'&&req.method==='POST'){requireTrade(req);const x=await readBody(req);if(!x.symbol||!x.quantity||!x.side)return res.status(400).json({error:'symbol, quantity, side wajib.'});return res.status(200).json(await bybit('/v5/order/create',{method:'POST',body:{category:'linear',symbol:String(x.symbol).toUpperCase(),side:String(x.side).toUpperCase(),orderType:'Market',qty:String(x.quantity),reduceOnly:true},signed:true}))}
+  return res.status(404).json({error:'Not found'});
+ }catch(error){console.error(error);return res.status(500).json({error:error.message||'Internal server error'})}
+}
