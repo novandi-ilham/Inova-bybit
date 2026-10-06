@@ -3,15 +3,50 @@ class CanvasChart {
   constructor(host){
     this.host=host; host.innerHTML='';
     this.canvas=document.createElement('canvas'); this.canvas.className='chart'; host.appendChild(this.canvas);
-    this.ctx=this.canvas.getContext('2d'); this.candles=[]; this.ema=[]; this.markers=[]; this.position=null; this.srLevels=null; this.offset=0; this.drag=false; this.lastX=0;
+    this.ctx=this.canvas.getContext('2d'); this.candles=[]; this.ema=[]; this.markers=[]; this.position=null; this.srLevels=null; this.offset=0; this.visible=90; this.drag=false; this.lastX=0; this.pointers=new Map(); this.lastPinchDistance=0; this.lastTap=0; this.panStartOffset=0;
     this.series={setData:d=>{this.setCandles(d.map(x=>({...x,volume:0})))},update:d=>{this.updateCandle(d)},createPriceLine:o=>{const x={...o};this.positionLines??=[];this.positionLines.push(x);this.render();return x},removePriceLine:x=>{this.positionLines=(this.positionLines||[]).filter(y=>y!==x);this.render()},setMarkers:m=>{this.setMarkers(m)}};
     this.emaSeries={setData:d=>{this.ema=d.map(x=>x.value);this.render()},update:d=>{this.ema[this.candles.length-1]=d.value;this.render()}};
     this.resizeObserver=new ResizeObserver(()=>this.resize()); this.resizeObserver.observe(host); this.resize();
-    this.canvas.addEventListener('wheel',e=>{e.preventDefault();const dir=e.deltaY>0?1:-1;this.zoom(dir)}, {passive:false});
-    this.canvas.addEventListener('pointerdown',e=>{this.drag=true;this.lastX=e.clientX;this.canvas.setPointerCapture?.(e.pointerId)});
-    this.canvas.addEventListener('pointermove',e=>{if(!this.drag)return;const dx=e.clientX-this.lastX;this.lastX=e.clientX;this.offset=Math.max(0,this.offset-Math.round(dx/7));this.clamp();this.render()});
-    this.canvas.addEventListener('pointerup',e=>{this.drag=false;this.canvas.releasePointerCapture?.(e.pointerId)});
-    this.canvas.addEventListener('pointerleave',()=>this.drag=false);
+    this.canvas.addEventListener('wheel',e=>{e.preventDefault();const dir=e.deltaY>0?1:-1;this.zoom(dir,e.clientX)}, {passive:false});
+    this.canvas.addEventListener('pointerdown',e=>{
+      this.pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+      this.canvas.setPointerCapture?.(e.pointerId);
+      if(this.pointers.size===1){this.drag=true;this.lastX=e.clientX;this.panStartOffset=this.offset;}
+      if(this.pointers.size===2){this.drag=false;this.lastPinchDistance=this.distance();}
+    });
+    this.canvas.addEventListener('pointermove',e=>{
+      if(!this.pointers.has(e.pointerId))return;
+      this.pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+      if(this.pointers.size>=2){
+        const d=this.distance();
+        if(this.lastPinchDistance>0 && d>0){
+          const factor=this.lastPinchDistance/d;
+          this.zoomByFactor(factor,this.centerX());
+        }
+        this.lastPinchDistance=d;
+        return;
+      }
+      if(!this.drag)return;
+      const dx=e.clientX-this.lastX;
+      this.lastX=e.clientX;
+      this.offset-=dx/Math.max(2,(this.host.clientWidth-88)/Math.max(30,this.visible));
+      this.clamp();this.render();
+    });
+    const end=e=>{
+      const wasSingle=this.pointers.size===1;
+      this.pointers.delete(e.pointerId);
+      try{this.canvas.releasePointerCapture?.(e.pointerId)}catch{}
+      if(this.pointers.size<2)this.lastPinchDistance=0;
+      if(this.pointers.size===0){
+        this.drag=false;
+        const now=Date.now();
+        if(wasSingle && now-this.lastTap<280){this.fitContent();}
+        this.lastTap=now;
+      }
+    };
+    this.canvas.addEventListener('pointerup',end);
+    this.canvas.addEventListener('pointercancel',end);
+    this.canvas.addEventListener('pointerleave',()=>{if(this.pointers.size===0)this.drag=false});
   }
   resize(){const r=this.host.getBoundingClientRect(),d=devicePixelRatio||1;this.canvas.width=Math.max(1,Math.floor(r.width*d));this.canvas.height=Math.max(1,Math.floor(r.height*d));this.canvas.style.width=r.width+'px';this.canvas.style.height=r.height+'px';this.ctx.setTransform(d,0,0,d,0,0);this.render()}
   setCandles(c){this.candles=c.slice(-150);this.clamp();this.render()}
@@ -20,9 +55,27 @@ class CanvasChart {
   setMarkers(m){this.markers=Array.isArray(m)?m.slice(-50):[];this.render()}
   setPosition(p){this.position=p;this.render()}
   setSR(x){this.srLevels=x;this.render()}
-  fitContent(){this.offset=0;this.render()}
-  clamp(){this.offset=Math.max(0,Math.min(this.offset,Math.max(0,this.candles.length-30)))}
-  zoom(dir){this.visible=Math.max(45,Math.min(170,(this.visible||110)+dir*8));this.render()}
+  fitContent(){this.visible=Math.min(90,Math.max(30,this.candles.length));this.offset=0;this.clamp();this.render()}
+  clamp(){const maxOffset=Math.max(0,this.candles.length-Math.max(30,Math.min(170,this.visible||90)));this.offset=Math.max(0,Math.min(this.offset,maxOffset))}
+  distance(){const a=[...this.pointers.values()];if(a.length<2)return 0;return Math.hypot(a[0].x-a[1].x,a[0].y-a[1].y)}
+  centerX(){const a=[...this.pointers.values()];if(!a.length)return this.host.clientWidth/2;return a.reduce((n,p)=>n+p.x,0)/a.length}
+  zoom(dir,anchorX=this.host.clientWidth/2){this.zoomByFactor(dir>0?1.10:0.90,anchorX)}
+  zoomByFactor(factor,anchorX=this.host.clientWidth/2){
+    const old=Math.max(30,Math.min(170,this.visible||90));
+    const next=Math.max(30,Math.min(170,old*factor));
+    if(Math.abs(next-old)<0.05)return;
+    const W=this.host.clientWidth;
+    const plotW=Math.max(1,W-88);
+    const rel=Math.max(0,Math.min(1,(anchorX-48)/plotW));
+    const n=this.candles.length;
+    const end=n-this.offset;
+    const start=Math.max(0,end-old);
+    const anchorIndex=start+rel*old;
+    this.visible=next;
+    const newStart=anchorIndex-rel*next;
+    this.offset=n-(newStart+next);
+    this.clamp();this.render();
+  }
   range(){const W=this.host.clientWidth,H=this.host.clientHeight,n=this.candles.length;const vis=Math.min(n,this.visible||110),end=n-this.offset,start=Math.max(0,end-vis),cs=this.candles.slice(start,end);let hi=Math.max(...cs.map(c=>c.high)),lo=Math.min(...cs.map(c=>c.low)); if(this.position){hi=Math.max(hi,+this.position.tp||hi,+this.position.entry||hi,+this.position.sl||hi);lo=Math.min(lo,+this.position.tp||lo,+this.position.entry||lo,+this.position.sl||lo)}const pad=(hi-lo)*.08||1;return {W,H,start,end,cs,hi:hi+pad,lo:lo-pad,vis}}
   px(i,r){return 48+(i-r.start+.5)*(r.W-88)/r.vis}
   py(v,r){return 8+(r.hi-v)/(r.hi-r.lo)*(r.H-34)}
