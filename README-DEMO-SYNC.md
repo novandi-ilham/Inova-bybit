@@ -31,12 +31,3 @@ Each symbol has its own consecutive-loss counter. A win resets that symbol. Thre
 ## Floating loss
 
 Paper hard floating-loss cutoff remains 0.20% of current paper equity per active position. Demo mode uses the actual Bybit Demo equity and unrealized PnL for the same 0.20% emergency cutoff.
-
-
-## V14 — BYBIT 15M CHART SYNC FIX
-- Bybit REST `/v5/market/kline` is authoritative for initial 150-bar history.
-- Old localStorage candle history is never used as a chart fallback.
-- Bybit WebSocket `kline.15.SYMBOL` updates the exact candle by `start` timestamp.
-- `confirm=false` remains the live/open candle; `confirm=true` is the closed candle.
-- REST reconciliation repairs missing/rolled candles and can force a full 150-bar resync when a gap is detected.
-- The chart uses only Bybit Linear 15M market data; no Binance source is used.

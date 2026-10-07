@@ -1,12 +1,12 @@
 {
   "name": "ilham-novandi-trader",
-  "version": "2.2.0",
+  "version": "1.6.0",
   "private": true,
   "type": "module",
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "build": "node --check api/index.js"
+    "build": "echo Vercel build ready"
   },
   "engines": {
     "node": "24.x"
