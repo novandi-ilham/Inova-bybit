@@ -6,7 +6,7 @@ window.addEventListener('appinstalled',()=>{deferredInstallPrompt=null;const b=d
 document.addEventListener('click',async e=>{if(e.target?.id==='installBtn'&&deferredInstallPrompt){deferredInstallPrompt.prompt();await deferredInstallPrompt.userChoice;deferredInstallPrompt=null;e.target.style.display='none'}});
 if('serviceWorker' in navigator){window.addEventListener('load',()=>navigator.serviceWorker.register('/sw.js').catch(()=>{}))}
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
-let symbol='BTCUSDT',tf='15m',candles=[],chart,series,emaSeries,ws=null,drawings=[],tool='none',auto=true,paperPos=null,demoPositions=[],demoPnl=0,paperPnl=0,dailyPnl=0,lossStreak=0,pairLossStreak={},pairCooldownUntil={},killed=false,accountEquity=10000000,mode='paper',srActive=false,tradeStats={wins:0,losses:0},tradeHistory=[],hunterBusy=false,lastHunterCandle=0,lastHunterSymbol='',lastSwitchAt=0,positionPriceLines=[],tradeMarkers=[],symbolGeneration=0,marketClockOffset=0,rotateAwaySymbol='',rotateAwayUntil=0,demoHistory=[],demoSyncAt=0,demoLastClosedAt=0;
+let symbol='BTCUSDT',tf='15m',candles=[],chart,series,emaSeries,ws=null,drawings=[],tool='none',auto=true,paperPos=null,demoPositions=[],demoPnl=0,paperPnl=0,dailyPnl=0,lossStreak=0,pairLossStreak={},pairCooldownUntil={},killed=false,accountEquity=500000,mode='paper',srActive=false,tradeStats={wins:0,losses:0},tradeHistory=[],hunterBusy=false,lastHunterCandle=0,lastHunterSymbol='',lastSwitchAt=0,positionPriceLines=[],tradeMarkers=[],symbolGeneration=0,marketClockOffset=0,rotateAwaySymbol='',rotateAwayUntil=0,demoHistory=[],demoSyncAt=0,demoLastClosedAt=0;
 // BYBIT-ONLY architecture: one exchange for market data, analysis and execution.
 const BYBIT_PUBLIC='https://api.bybit.com';
 const BYBIT_WS='wss://stream.bybit.com/v5/public/linear';
@@ -35,7 +35,7 @@ const DEFAULT_PAPER_MARGIN_IDR=500000; const DEFAULT_LEVERAGE=10;
 const HUNTER={minConfidence:0,switchAdvantage:0,scanMs:2000,candidateCount:16,cooldownMs:500};
 const PAIR_LOSS_COOLDOWN_MS=30*60*1000;
 const HARD_RISK_PCT=0.20;
-const LONG_PREFERENCE_GAP=0; // Tidak ada bias paksa BUY/SELL; arah dipilih dari skor aktual candle + momentum.
+const LONG_PREFERENCE_GAP=6;
 const scannerKlineCache=new Map();
 async function getScannerKlines(sym){const hit=scannerKlineCache.get(sym);if(hit&&Date.now()-hit.at<5000)return hit.data;const d=await bybitPublic('/v5/market/kline',{category:'linear',symbol:sym,interval:'15',limit:'80'});const data=d?.result?.list||[];if(!data.length)throw new Error('Bybit kline kosong');scannerKlineCache.set(sym,{at:Date.now(),data});return data;}
 const IDR=16000; const fmtP=n=>Number(n||0).toLocaleString('en-US',{maximumFractionDigits:priceDecimals(n)}); const fmtIDR=n=>'Rp '+Math.round(n||0).toLocaleString('id-ID');
@@ -91,8 +91,8 @@ function analyzeData(cs){
  if(regime==='RANGE'){long-=8;short-=8} if(regime==='EXTREME VOLATILITY'){long-=12;short-=12}
  long=Math.max(0,Math.min(100,long)); short=Math.max(0,Math.min(100,short));
  const score=Math.max(long,short);
- // Direction is neutral: tidak ada bonus BUY/SHORT buatan. Pilih sisi yang benar-benar lebih kuat; jika seri, ikuti candle aktif.
- const bias=long>short?'LONG':short>long?'SHORT':bull?'LONG':bear?'SHORT':'NEUTRAL';
+ // Direction is score-led, with a small LONG preference. A SHORT must have clearly stronger evidence.
+ const bias=long>=short-LONG_PREFERENCE_GAP&&long>0?'LONG':short>long+LONG_PREFERENCE_GAP?'SHORT':bull?'LONG':bear?'SHORT':'NEUTRAL';
  const reasons=[];
  if(regime==='EXTREME VOLATILITY')reasons.push('volatilitas ekstrem');
  if(Math.abs(momentum)<.20)reasons.push('momentum sangat lemah');
@@ -103,11 +103,11 @@ function analyzeData(cs){
  if(bias==='SHORT'&&c.close>e)reasons.push('harga belum konfirmasi EMA20');
  // ACTIVE CANDLE MODE: score/confidence 60% is informational only.
  // Entry is driven primarily by the current 15M candle direction + real-time momentum.
- const longSetup=bull&&bodyPct>=0.20&&momentum>0&&!nearRes&&regime!=='EXTREME VOLATILITY';
- const shortSetup=bear&&bodyPct>=0.20&&momentum<0&&!nearSup&&regime!=='EXTREME VOLATILITY';
+ const longSetup=bull&&bodyPct>=0.30&&momentum>0.08&&!nearRes&&regime!=='EXTREME VOLATILITY';
+ const shortSetup=bear&&bodyPct>=0.30&&momentum<-0.08&&!nearSup&&regime!=='EXTREME VOLATILITY';
  if(bias==='LONG'&&!longSetup)reasons.push('candle LONG belum cukup kuat');
  if(bias==='SHORT'&&!shortSetup)reasons.push('candle SHORT belum cukup kuat');
- const shortApproved=shortSetup&&short>=long;
+ const shortApproved=shortSetup&&short>long+LONG_PREFERENCE_GAP;
  const allowed=regime!=='EXTREME VOLATILITY'&&((bias==='LONG'&&longSetup)||(bias==='SHORT'&&shortApproved));
  const slDist=Math.max(A*.8,c.close*.004),rr=2,tpDist=slDist*rr;
  return {c,e,A,support,resistance,body,range,wU,wL,bodyPct,bull,bear,trend,momentum,vol,breakoutLong,breakoutShort,rejectLong,rejectShort,nearRes,nearSup,emaSlope,regime,longScore:long,shortScore:short,score,bias,reasons,allowed,slDist,tpDist,rr};
@@ -250,7 +250,7 @@ async function scan(){
   $('#leaders').innerHTML='<div class="muted">Top Gainers</div>'+gainers.map(x=>`<div class="kv"><span>${x.symbol}</span><b class="up">+${(Number(x.price24hPcnt)*100).toFixed(2)}%</b></div>`).join('')+'<div class="muted" style="margin-top:8px">Top Losers</div>'+losers.map(x=>`<div class="kv"><span>${x.symbol}</span><b class="down">${(Number(x.price24hPcnt)*100).toFixed(2)}%</b></div>`).join('');
   if(auto&&!killed&&(mode==='paper'||mode==='demo')&&Date.now()-lastSwitchAt>=HUNTER.cooldownMs){
    const results=await Promise.all(universe.map(async x=>{try{const d=await bybitPublic('/v5/market/kline',{category:'linear',symbol:x.symbol,interval:'15',limit:'80'});const kd=(d?.result?.list||[]).slice().reverse();const cs=kd.map(k=>({time:Math.floor(Number(k[0])/1000),open:+k[1],high:+k[2],low:+k[3],close:+k[4],volume:+k[5]}));const a=analyzeData(cs);if(!a||!a.allowed)return null;return {symbol:x.symbol,score:a.score,bias:a.bias,analysis:a,change:Number(x.price24hPcnt)*100,volume:Number(x.turnover24h)};}catch{return null}}));
-   const ranked=results.filter(x=>x&&!isPairLossBlocked(x.symbol)&&!(x.symbol===rotateAwaySymbol&&Date.now()<rotateAwayUntil)).map(x=>({...x,rankScore:x.score})).sort((a,b)=>b.rankScore-a.rankScore),best=ranked[0],current=mode==='paper'?(paperPos?analyze():null):((currentDemoPosition()&&symbol)?analyze():null),currentScore=current?.score||0,demoActive=mode==='demo'&&!!currentDemoPosition(),active=mode==='paper'?hasValidPaperPosition():demoActive,exitReason=mode==='paper'?(active?lossExitReason(current,best):null):(demoActive?demoLossExitReason(currentDemoPosition()):null);
+   const ranked=results.filter(x=>x&&!isPairLossBlocked(x.symbol)&&!(x.symbol===rotateAwaySymbol&&Date.now()<rotateAwayUntil)).map(x=>({...x,rankScore:x.score+(x.bias==='LONG'?3:0)})).sort((a,b)=>b.rankScore-a.rankScore),best=ranked[0],current=mode==='paper'?(paperPos?analyze():null):((currentDemoPosition()&&symbol)?analyze():null),currentScore=current?.score||0,demoActive=mode==='demo'&&!!currentDemoPosition(),active=mode==='paper'?hasValidPaperPosition():demoActive,exitReason=mode==='paper'?(active?lossExitReason(current,best):null):(demoActive?demoLossExitReason(currentDemoPosition()):null);
    const isLossExit=!!exitReason&&/(LOSS|CANDLE BERBALIK|SETUP BERUBAH|MINUS TERUS|COOLDOWN)/i.test(exitReason);
    const isProfitGiveback=!!exitReason&&exitReason.startsWith('PROFIT GIVEBACK');const activeSymbol=mode==='paper'?paperPos?.symbol:currentDemoPosition()?.symbol;const canRotate=active&&exitReason&&best&&((best.symbol!==activeSymbol)||isProfitGiveback||isLossExit);
    if(best&&(!active||canRotate)){
@@ -310,7 +310,7 @@ function openPaper(side,forcedAnalysis=null){
   const margin=mode==='paper'?notional/Math.max(1,leverage):0;
   if(mode==='paper'&&margin>accountEquity+paperPnl){log(`ENTRY BLOCKED: margin ${fmtIDR(margin)} melebihi available balance`);syncPaperStateUI(a);return false;}
   if((side==='BUY'&&(sl>=p||tp<=p))||(side==='SELL'&&(sl<=p||tp>=p))){log('ENTRY BLOCKED: SL/TP tidak valid');$('#engineStatus').className='dangerbox';$('#engineStatus').textContent='NO TRADE · SL/TP tidak valid';return false}
-  paperPos={symbol,side,entry:p,qty,sl,tp,initialSL:sl,be:false,partial:false,trail:false,opened:Date.now(),risk,margin,leverage,notional,entryCandleTime:a.c.time,entryScore:a.score,entryBias:a.bias,peakPnl:0,negativeScans:0};
+  paperPos={symbol,side,entry:p,qty,sl,tp,initialSL:sl,be:false,partial:false,trail:false,opened:Date.now(),risk,riskMoney,margin,leverage,notional,entryCandleTime:a.c.time,entryScore:a.score,entryBias:a.bias,peakPnl:0,negativeScans:0};
   addTradeMarker('entry',paperPos); renderTradeVisuals(); persist(); syncPaperStateUI(a); log(`AUTO/ PAPER ${side} ${symbol} · ENTRY ${fmtTradeP(p)} · SL ${fmtTradeP(sl)} · TP ${fmtTradeP(tp)} · SCORE ${a.score.toFixed(0)}%`); return true;
 }
 function renderPosition(pnl=0){if(!hasValidPaperPosition()){$('#position').innerHTML='<div class="muted">Tidak ada posisi.</div>';return}let p=paperPos;$('#position').innerHTML=`<div class="grid3"><div class="metric"><span class="muted">Side</span><b class="${p.side==='BUY'?'up':'down'}">${p.side} ${p.symbol}</b></div><div class="metric"><span class="muted">Entry</span><b>${fmtTradeP(p.entry)}</b></div><div class="metric"><span class="muted">Qty</span><b>${p.qty.toFixed(6)}</b></div></div><div class="grid3" style="margin-top:7px"><div class="metric"><span class="muted">Margin</span><b>${fmtIDR(p.margin||0)}</b></div><div class="metric"><span class="muted">Leverage</span><b>${Number(p.leverage||1)}x</b></div><div class="metric"><span class="muted">Position Size</span><b>${fmtIDR(p.notional||0)}</b></div></div><div class="grid3" style="margin-top:7px"><div class="metric"><span class="muted">SL</span><b>${fmtTradeP(p.sl)}</b></div><div class="metric"><span class="muted">TP</span><b>${fmtTradeP(p.tp)}</b></div><div class="metric"><span class="muted">PnL</span><b class="${pnl>=0?'up':'down'}">${fmtIDR(pnl)}</b></div></div><div class="kv"><span>BE / Partial / Trail</span><b>${p.be?'ON':'OFF'} / ${p.partial?'ON':'OFF'} / ${p.trail?'ON':'OFF'}</b></div><div class="kv"><span>Peak Profit / Giveback</span><b>${fmtIDR(p.peakPnl||0)} / ${Number($('#profitGiveback')?.value||35)}%</b></div>`}
@@ -320,7 +320,7 @@ function paperMargin(){return Math.max(0,Number($('#margin').value)||DEFAULT_PAP
 function paperLeverage(){return Math.max(1,Number($('#lev').value)||DEFAULT_LEVERAGE)}
 function paperNotional(){return paperMargin()*paperLeverage()}
 function renderPaperOrderPreview(){const m=paperMargin(),lev=paperLeverage(),notional=paperNotional();$('#marginOut').textContent=fmtIDR(m);$('#positionSizeOut').textContent=fmtIDR(notional);if(hasValidPaperPosition())return;let a=analyze();if(a){let risk=HARD_RISK_PCT/100,sp=Number($('#slPct').value)/100,rr=Number($('#rr').value),p=a.c.close,sl=a.bias==='SHORT'?p*(1+sp):p*(1-sp),tp=a.bias==='SHORT'?p*(1-sp*rr):p*(1+sp*rr);$('#slOut').textContent=fmtP(sl);$('#tpOut').textContent=fmtP(tp)}}
-function updatePaperAccount(unrealized=0){paperPnl=tradeHistory.reduce((a,t)=>a+Number(t.pnl||0),0);const balance=accountEquity+paperPnl,usedMargin=hasValidPaperPosition()?Number(paperPos.margin||0):0;$('#acctStatus').textContent='PAPER';$('#balance').textContent=fmtIDR(balance);$('#available').textContent=fmtIDR(Math.max(0,balance-usedMargin));$('#unrealized').textContent=fmtIDR(unrealized);$('#paperPnl').textContent=fmtIDR(paperPnl);renderPerformance(unrealized)}
+function updatePaperAccount(unrealized=0){if(mode==='paper')accountEquity=paperMargin();paperPnl=tradeHistory.reduce((a,t)=>a+Number(t.pnl||0),0);const balance=accountEquity+paperPnl,usedMargin=hasValidPaperPosition()?Number(paperPos.margin||0):0;$('#acctStatus').textContent='PAPER';$('#balance').textContent=fmtIDR(balance);$('#available').textContent=fmtIDR(Math.max(0,balance-usedMargin));$('#unrealized').textContent=fmtIDR(unrealized);$('#paperPnl').textContent=fmtIDR(paperPnl);renderPerformance(unrealized)}
 function aSafeBear(){const a=analyze();return !!(a&&a.bear&&a.bodyPct>=0.25);}
 function aSafeBull(){const a=analyze();return !!(a&&a.bull&&a.bodyPct>=0.25);}
 function hardLossTriggerPrice(limit){
@@ -341,8 +341,8 @@ function updatePosition(price){
  if(!p.be&&raw>=r*1){p.sl=p.entry*(p.side==='BUY'?1.0002:.9998);p.be=true;log('SL PLUS → BREAK EVEN')}
  if(p.trail&&raw>r*1.5){let t=atr()*0.8;p.sl=p.side==='BUY'?Math.max(p.sl,price-t):Math.min(p.sl,price+t)}
  renderPosition(pnlIDR);updatePaperAccount(pnlIDR);renderTradeVisuals();
- // Pair-level protection: 1 closed loss on the same pair immediately forces rotation/cooldown.
- if(isPairLossBlocked(p.symbol)&&pnlIDR<=0){const locked=pnlIDR;log(`PAIR LOCK LIVE → ${p.symbol} · LOSS 1X · posisi ditutup & ROTATE`);closePaper(price,locked,'PAIR 3 LOSS LOCK');return;}
+ // Pair-level protection: 3 consecutive closed losses on the same pair locks that pair.
+ if(isPairLossBlocked(p.symbol)&&pnlIDR<=0){const locked=pnlIDR;log(`PAIR LOCK LIVE → ${p.symbol} · 3 LOSS BERUNTUN · posisi ditutup`);closePaper(price,locked,'PAIR 3 LOSS LOCK');return;}
  // Profit protection is checked on EVERY live tick, not only on the 5s hunter scan.
  // Example: peak +Rp100.000 with 10% giveback => close at +Rp90.000.
  // ACTIVE LOSS EXIT: when a losing position meets a clearly opposite 15M candle, close immediately.
@@ -356,7 +356,7 @@ function updatePosition(price){
  }
  // HARD FLOATING-LOSS GUARD: checked on EVERY live price/UI tick.
  // Independent of Auto Rotate, scanner results, or signal validity.
- // Equity Rp10.000.000 × 0.20% = Rp20.000 maximum floating loss.
+ // Paper modal mengikuti field Modal Paper / Risk Base; default Rp500.000 × 0.20% = Rp1.000 maximum floating loss.
  const hardLossPct=HARD_RISK_PCT/100;
  const currentEquity=Math.max(1,Number(accountEquity)+Number(paperPnl));
  const hardLossLimit=hardLossPct*currentEquity;
@@ -369,13 +369,15 @@ function updatePosition(price){
  }
  const givebackPct=Math.min(100,Math.max(1,Number($('#profitGiveback').value)||35))/100;
  const peak=Number(p.peakPnl||0);
- const givebackHit=$('#autoRotate')?.checked && peak>0 && pnlIDR>0 && pnlIDR<=peak*(1-givebackPct);
+ const riskMoney=Math.max(1,Number(p.riskMoney||hardLossLimit));
+ // Jangan memotong winner kecil. Profit giveback baru aktif setelah trade
+ // mencapai minimal +1.25R; setelah itu beri ruang sampai batas giveback.
+ const givebackFloor=Math.max(riskMoney*0.50,peak*(1-givebackPct));
+ const givebackHit=$('#autoRotate')?.checked && peak>=riskMoney*1.25 && pnlIDR>0 && pnlIDR<=givebackFloor;
  if(givebackHit){
    const locked=pnlIDR;
-   log(`PROFIT LOCK LIVE → ${p.symbol} peak ${fmtIDR(peak)} → ${fmtIDR(locked)} · giveback ${((peak-locked)/peak*100).toFixed(1)}%`);
+   log(`PROFIT LOCK LIVE → ${p.symbol} peak ${fmtIDR(peak)} → ${fmtIDR(locked)} · giveback ${((peak-locked)/peak*100).toFixed(1)}% · minimum +1.25R`);
    closePaper(price,locked,'PROFIT GIVEBACK');
-   // scan() will run again immediately on the next hunter cycle and may re-enter
-   // the same pair if it is still the strongest valid 15M opportunity.
    return;
  }
  let hit=p.side==='BUY'?(price<=p.sl||price>=p.tp):(price>=p.sl||price<=p.tp);
@@ -389,3 +391,4 @@ function setMode(){mode=$('#orderMode').value;$('#mode').textContent=mode==='dem
 function runBacktest(){let n=Math.min(Number($('#btLimit').value),candles.length-25),risk=Number($('#btRisk').value),rr=Number($('#btRR').value),start=candles.length-n,equity=0,peak=0,maxDD=0,wins=0,losses=0,net=0,worst=0,streak=0,best=-Infinity;for(let i=start+20;i<candles.length-1;i++){let sub=candles.slice(0,i+1),old=candles; candles=sub;let a=analyze();candles=old;if(!a)continue;let signal=$('#btStrategy').value==='reversal'?(a.wick===1?'LONG':a.wick===-1?'SHORT':null):a.bias==='LONG'?'LONG':a.bias==='SHORT'?'SHORT':null;if(!signal||!a.allowed)continue;let entry=candles[i].close,slPct=Number($('#slPct').value)/100,sl=signal==='LONG'?entry*(1-slPct):entry*(1+slPct),tp=signal==='LONG'?entry*(1+slPct*rr):entry*(1-slPct*rr),out=null;for(let j=i+1;j<candles.length;j++){let c=candles[j];if(signal==='LONG'){if(c.low<=sl){out=-1;break}if(c.high>=tp){out=rr;break}}else{if(c.high>=sl){out=-1;break}if(c.low<=tp){out=rr;break}}}if(out===null)continue;net+=out;equity+=out*risk;best=Math.max(best,out);if(out>0){wins++;streak=0}else{losses++;streak++;worst=Math.max(worst,streak)}peak=Math.max(peak,equity);maxDD=Math.max(maxDD,peak-equity)}let trades=wins+losses,pf=losses?wins*rr/losses:Infinity;$('#btTrades').textContent=trades;$('#btWin').textContent=trades?(wins/trades*100).toFixed(1)+'%':'—';$('#btPF').textContent=Number.isFinite(pf)?pf.toFixed(2):'∞';$('#btDD').textContent=maxDD.toFixed(2)+'%';$('#btNet').textContent=net.toFixed(2)+'R';$('#btStreak').textContent=worst;$('#btBest').textContent=best===-Infinity?'—':best.toFixed(2)+'R';$('#btSummary').textContent=trades?`Hasil simulasi 15M: ${trades} trade, ${wins} win, ${losses} loss. Consecutive loss terburuk ${worst}. Gunakan hasil ini untuk mengukur robustness, bukan jaminan hasil masa depan.`:'Tidak ada setup valid pada periode tersebut.';log('Backtest selesai: '+trades+' trades')}
 $$('[data-tool]').forEach(b=>b.onclick=()=>{$$('[data-tool]').forEach(x=>x.classList.remove('active'));b.classList.add('active');tool=b.dataset.tool});$('#srBtn').onclick=()=>{srActive=!srActive;$('#srBtn').classList.toggle('active',srActive);if(srActive)drawSR();else{drawings.forEach(x=>x.remove?.());drawings=[]}};$('#clearDraw').onclick=()=>{drawings.forEach(x=>x.remove?.());drawings=[]};$('#buyBtn').onclick=()=>submitOrder('BUY');$('#sellBtn').onclick=()=>submitOrder('SELL');$('#closeBtn').onclick=closePosition;$('#beBtn').onclick=()=>{if(paperPos){paperPos.sl=paperPos.entry*(paperPos.side==='BUY'?1.0002:.9998);paperPos.be=true;renderPosition();log('Manual SL Plus / BE')}};$('#partialBtn').onclick=()=>{if(paperPos&&!paperPos.partial){paperPos.qty*=.5;paperPos.partial=true;log('Partial TP: 50% size dikunci')}};$('#trailBtn').onclick=()=>{if(paperPos){paperPos.trail=!paperPos.trail;log('Trailing '+(paperPos.trail?'ON':'OFF'))}};$('#orderMode').onchange=setMode;['margin','lev','risk','slPct','rr','maxFloatLoss','profitGiveback','negativeScans'].forEach(id=>{const el=$('#'+id);if(el){el.addEventListener('input',()=>{renderPaperOrderPreview();persist();});el.addEventListener('change',()=>{renderPaperOrderPreview();persist();});}});$('#accountBtn').onclick=account;$('#refreshScan').onclick=scan;$('#autoToggle').onclick=()=>{auto=!auto;$('#autoToggle').textContent=auto?'AUTO ON':'AUTO OFF'};$('#killBtn').onclick=()=>{killed=!killed;$('#killBtn').textContent='KILL SWITCH: '+(killed?'ON':'OFF');$('#killBtn').classList.toggle('active',killed);log(killed?'KILL SWITCH ON — semua auto/manual entry baru diblokir':'KILL SWITCH OFF — auto entry diizinkan kembali');if(!killed&&mode==='demo')account();};$('#runBacktest').onclick=runBacktest;$('#downloadHistory').onclick=downloadTradeHistory;
 (async()=>{killed=false;$('#killBtn').textContent='KILL SWITCH: OFF';$('#killBtn').classList.remove('active');initChart();restore();updatePairLossUI(symbol);renderPaperOrderPreview();$('#symbolTitle').textContent=symbol;symbolGeneration++;const bootGen=symbolGeneration;try{await diagnoseMarketAccess();await syncMarketClock();setInterval(syncMarketClock,30000);const historyOK=await loadCandles(symbol,bootGen);if(bootGen===symbolGeneration){if(historyOK)await reconcileRealtime();connectWS(symbol,bootGen);}renderPosition();if(historyOK)await scan();else { $('#scanState').textContent='BYBIT MARKET BLOCKED'; $('#conn').textContent=`MARKET UNAVAILABLE · ${marketDiagnostic.direct} · ${marketDiagnostic.proxy}`; }log('System ready · BYBIT LINEAR · 15M · WebSocket-first · REST history/reconciliation')}catch(e){log('Init error: '+e.message);try{connectWS(symbol,bootGen)}catch{}}setInterval(updateUI,1000);setInterval(reconcileRealtime,1500);setInterval(()=>{if(mode==='demo')account().catch(()=>{});},2000);setInterval(()=>{if(mode==='demo')fetchDemoHistory().catch(()=>{});},7000);setInterval(scan,HUNTER.scanMs)})();
+
