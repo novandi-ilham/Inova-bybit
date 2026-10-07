@@ -1,3 +1,6 @@
+
+## V17 EARLY MOMENTUM HANDOFF
+Entry memakai snapshot scanner Bybit 15M lebih dahulu, chart sync berjalan setelah handoff, dengan anti-chase untuk mencegah entry terlambat.
 # Ilham Novandi — Bybit Linear Futures 15M
 
 This build is Bybit-only end-to-end: Bybit Linear USDT market data, 15M candle history, public WebSocket realtime updates, scanner, paper analysis, and server-side account/order endpoints.
