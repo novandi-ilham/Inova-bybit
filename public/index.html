@@ -136,6 +136,19 @@ function analyzeData(cs){
  const c=cs.at(-1),p=cs.at(-2),cl=cs.map(x=>x.close),es=ema(cl),e=es.at(-1),A=atr(cs),{support,resistance}=sr(cs);
  const body=Math.abs(c.close-c.open),range=Math.max(c.high-c.low,Number.EPSILON),wU=c.high-Math.max(c.open,c.close),wL=Math.min(c.open,c.close)-c.low;
  const bodyPct=body/range, bull=c.close>c.open,bear=c.close<c.open, trend=c.close>=e?1:-1;
+ // TWO-CANDLE CONFIRMATION: use the two most recently COMPLETED 15M candles.
+ // The last candle in Bybit REST/WS can still be forming, so it is context only.
+ const cc=cs.length>=3?cs.at(-2):p, pc=cs.length>=4?cs.at(-3):cs.at(-3)||p;
+ const ccBody=Math.abs(cc.close-cc.open),ccRange=Math.max(cc.high-cc.low,Number.EPSILON);
+ const pcBody=Math.abs(pc.close-pc.open),pcRange=Math.max(pc.high-pc.low,Number.EPSILON);
+ const ccBull=cc.close>cc.open,ccBear=cc.close<cc.open,pcBull=pc.close>pc.open,pcBear=pc.close<pc.open;
+ const ccBodyPct=ccBody/ccRange,pcBodyPct=pcBody/pcRange;
+ const ccUpper=cc.high-Math.max(cc.open,cc.close),ccLower=Math.min(cc.open,cc.close)-cc.low;
+ const pcUpper=pc.high-Math.max(pc.open,pc.close),pcLower=Math.min(pc.open,pc.close)-pc.low;
+ const twoBull=pcBull&&ccBull&&cc.close>pc.close&&ccBodyPct>=.22&&pcBodyPct>=.22;
+ const twoBear=pcBear&&ccBear&&cc.close<pc.close&&ccBodyPct>=.22&&pcBodyPct>=.22;
+ const bullRejection=ccUpper>Math.max(ccBody*1.45,A*.15),bearRejection=ccLower>Math.max(ccBody*1.45,A*.15);
+ const earlyBull=twoBull&&!bullRejection,earlyBear=twoBear&&!bearRejection;
  const momentum=(c.close-p.close)/(A||Math.max(c.close*.001,1));
  const avgVol=cs.slice(-21,-1).reduce((a,x)=>a+x.volume,0)/20,vol=avgVol?c.volume/avgVol:1;
  const prev20=cs.slice(-21,-1), hi=Math.max(...prev20.map(x=>x.high)),lo=Math.min(...prev20.map(x=>x.low));
@@ -166,14 +179,20 @@ function analyzeData(cs){
  if(bias==='SHORT'&&c.close>e)reasons.push('harga belum konfirmasi EMA20');
  // ACTIVE CANDLE MODE: score/confidence 60% is informational only.
  // Entry is driven primarily by the current 15M candle direction + real-time momentum.
- const longSetup=bull&&bodyPct>=0.30&&momentum>0.08&&!nearRes&&regime!=='EXTREME VOLATILITY';
- const shortSetup=bear&&bodyPct>=0.30&&momentum<-0.08&&!nearSup&&regime!=='EXTREME VOLATILITY';
+ // Early momentum: two completed candles in the same direction are a confirmation,
+ // not a 60% score gate. A single strong breakout candle remains an alternate entry path.
+ const strongBreakLong=breakoutLong&&bull&&bodyPct>=.28&&momentum>0.05;
+ const strongBreakShort=breakoutShort&&bear&&bodyPct>=.28&&momentum<-0.05;
+ const longSetup=(earlyBull||strongBreakLong||((bull&&bodyPct>=.30)&&momentum>0.08))&&!nearRes&&regime!=='EXTREME VOLATILITY';
+ const shortSetup=(earlyBear||strongBreakShort||((bear&&bodyPct>=.30)&&momentum<-0.08))&&!nearSup&&regime!=='EXTREME VOLATILITY';
+ if(earlyBull)reasons.push('2 CANDLE HIJAU · momentum BUY terkonfirmasi');
+ if(earlyBear)reasons.push('2 CANDLE MERAH · momentum SELL terkonfirmasi');
  if(bias==='LONG'&&!longSetup)reasons.push('candle LONG belum cukup kuat');
  if(bias==='SHORT'&&!shortSetup)reasons.push('candle SHORT belum cukup kuat');
  const shortApproved=shortSetup&&short>long+LONG_PREFERENCE_GAP;
  const allowed=regime!=='EXTREME VOLATILITY'&&((bias==='LONG'&&longSetup)||(bias==='SHORT'&&shortApproved));
  const slDist=Math.max(A*.8,c.close*.004),rr=2,tpDist=slDist*rr;
- return {c,e,A,support,resistance,body,range,wU,wL,bodyPct,bull,bear,trend,momentum,vol,breakoutLong,breakoutShort,rejectLong,rejectShort,nearRes,nearSup,emaSlope,regime,longScore:long,shortScore:short,score,bias,reasons,allowed,slDist,tpDist,rr};
+ return {c,e,A,support,resistance,body,range,wU,wL,bodyPct,bull,bear,trend,momentum,vol,breakoutLong,breakoutShort,rejectLong,rejectShort,nearRes,nearSup,emaSlope,regime,completedCandle:cc,previousCompletedCandle:pc,twoBull,twoBear,earlyBull,earlyBear,ccBodyPct,pcBodyPct,bullRejection,bearRejection,longScore:long,shortScore:short,score,bias,reasons,allowed,slDist,tpDist,rr};
 }
 function analyze(){return analyzeData(candles)}
 function intervalSec(){return 900}
