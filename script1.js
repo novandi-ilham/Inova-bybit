@@ -1,0 +1,491 @@
+
+let deferredInstallPrompt=null;
+window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredInstallPrompt=e;const b=document.getElementById('installBtn');if(b)b.style.display='inline-block'});
+window.addEventListener('appinstalled',()=>{deferredInstallPrompt=null;const b=document.getElementById('installBtn');if(b)b.style.display='none'});
+document.addEventListener('click',async e=>{if(e.target?.id==='installBtn'&&deferredInstallPrompt){deferredInstallPrompt.prompt();await deferredInstallPrompt.userChoice;deferredInstallPrompt=null;e.target.style.display='none'}});
+if('serviceWorker' in navigator){window.addEventListener('load',()=>navigator.serviceWorker.register('/sw.js').catch(()=>{}))}
+const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+let symbol='BTCUSDT',tf='15m',candles=[],chart,series,emaSeries,ws=null,drawings=[],tool='none',auto=false,paperPos=null,demoPositions=[],demoPnl=0,paperPnl=0,dailyPnl=0,lossStreak=0,pairLossStreak={},pairCooldownUntil={},killed=false,accountEquity=10000000,mode='paper',srActive=false,tradeStats={wins:0,losses:0},tradeHistory=[],hunterBusy=false,lastHunterCandle=0,lastHunterSymbol='',lastSwitchAt=0,positionPriceLines=[],tradeMarkers=[],symbolGeneration=0,marketClockOffset=0,rotateAwaySymbol='',rotateAwayUntil=0,demoHistory=[],demoSyncAt=0,demoLastClosedAt=0;
+// BYBIT-ONLY architecture: one exchange for market data, analysis and execution.
+const BYBIT_PUBLIC='https://api.bybit.com';
+const BYBIT_WS='wss://stream.bybit.com/v5/public/linear';
+let marketSource='DIRECT';
+let marketProvider='BYBIT';
+let marketDiagnostic={direct:'NOT_TESTED',proxy:'NOT_TESTED',directStatus:null,proxyStatus:null,error:''};
+async function diagnoseMarketAccess(){
+  marketDiagnostic={direct:'TESTING',proxy:'TESTING',directStatus:null,proxyStatus:null,error:''};
+  const u=BYBIT_PUBLIC+'/v5/market/time?_diag='+Date.now();
+  try{const ac=new AbortController();const timer=setTimeout(()=>ac.abort(),7000);const r=await fetch(u,{cache:'no-store',signal:ac.signal});clearTimeout(timer);marketDiagnostic.directStatus=r.status;if(r.ok){const d=await r.json();if(Number(d?.retCode)===0){marketDiagnostic.direct='OK';log('Market diagnostic · DIRECT Bybit OK');}else marketDiagnostic.direct='API ERROR';}else{marketDiagnostic.direct='HTTP '+r.status;log('Market diagnostic · DIRECT Bybit HTTP '+r.status);}}catch(e){marketDiagnostic.direct='ERROR';marketDiagnostic.error=String(e?.name||e?.message||e);log('Market diagnostic · DIRECT Bybit error: '+marketDiagnostic.error)}
+  try{const r=await fetch('/api/market/diagnostic?_diag='+Date.now(),{cache:'no-store'});marketDiagnostic.proxyStatus=r.status;const d=await r.clone().json().catch(()=>({}));if(r.ok&&d.ok)marketDiagnostic.proxy='OK';else marketDiagnostic.proxy=d?.bybitHttp?('BYBIT HTTP '+d.bybitHttp):'HTTP '+r.status;log('Market diagnostic · SERVER proxy '+marketDiagnostic.proxy);}catch(e){marketDiagnostic.proxy='ERROR';log('Market diagnostic · SERVER proxy error: '+String(e?.message||e))}
+  marketSource=marketDiagnostic.direct==='OK'?'DIRECT':marketDiagnostic.proxy==='OK'?'SERVER-PROXY':'UNAVAILABLE';
+  $('#conn').textContent='BYBIT MARKET · DIRECT='+marketDiagnostic.direct+' · PROXY='+marketDiagnostic.proxy;
+  return marketDiagnostic;
+}
+async function bybitPublic(path,params={}){
+ const qs=new URLSearchParams(params).toString(); const direct=BYBIT_PUBLIC+path+(qs?'?'+qs:'');
+ try{const r=await fetch(direct,{cache:'no-store',headers:{'Cache-Control':'no-cache','Pragma':'no-cache'}});if(r.ok){const d=await r.json();if(Number(d?.retCode)===0){marketSource='DIRECT';return d;}throw new Error(d?.retMsg||'Bybit API error');}if(r.status!==403&&r.status!==451)throw new Error(`Bybit ${r.status}`)}catch(e){marketDiagnostic.error=String(e?.message||e)}
+ const proxyMap={'/v5/market/time':'/api/market/time','/v5/market/kline':'/api/market/klines','/v5/market/tickers':'/api/market/ticker','/v5/market/orderbook':'/api/market/orderbook','/v5/market/recent-trade':'/api/market/recent-trade','/v5/market/instruments-info':'/api/exchange-info'};const pp=proxyMap[path];if(!pp)throw new Error('Unsupported Bybit market proxy path: '+path);const r=await fetch(pp+'?'+new URLSearchParams({...params,_:Date.now()}),{cache:'no-store'});const d=await r.json().catch(()=>({}));if(!r.ok||d?.retCode!==undefined&&Number(d.retCode)!==0)throw new Error(d?.error||d?.retMsg||`Bybit proxy HTTP ${r.status}`);marketSource='SERVER-PROXY';return d;
+}
+async function fetchBybitKlines(symbolName,limit=150){const d=await bybitPublic('/v5/market/kline',{category:'linear',symbol:String(symbolName).toUpperCase(),interval:'15',limit:String(limit)});const list=d?.result?.list;if(!Array.isArray(list)||!list.length)throw new Error(d?.retMsg||'Bybit kline kosong');return list.slice().reverse().map(k=>({time:Math.floor(Number(k[0])/1000),open:+k[1],high:+k[2],low:+k[3],close:+k[4],volume:+k[5]})).filter(x=>[x.time,x.open,x.high,x.low,x.close,x.volume].every(Number.isFinite));}
+async function fetchMarketKlines(symbolName,limit=150){const out=await fetchBybitKlines(symbolName,limit);marketProvider='BYBIT';return out;}
+async function nowMarketMs(){return Date.now()+marketClockOffset;}
+async function syncMarketClock(){try{const d=await bybitPublic('/v5/market/time');const sec=Number(d?.result?.timeSecond);if(Number.isFinite(sec))marketClockOffset=sec*1000-Date.now();}catch{}}
+const DEFAULT_PAPER_MARGIN_IDR=500000; const DEFAULT_LEVERAGE=10;
+const HUNTER={minConfidence:0,switchAdvantage:0,scanMs:2000,candidateCount:16,cooldownMs:500};
+const PAIR_LOSS_COOLDOWN_MS=30*60*1000;
+const HARD_RISK_PCT=0.20;
+const LONG_PREFERENCE_GAP=6;
+const scannerKlineCache=new Map();
+async function getScannerKlines(sym){const hit=scannerKlineCache.get(sym);if(hit&&Date.now()-hit.at<5000)return hit.data;const d=await bybitPublic('/v5/market/kline',{category:'linear',symbol:sym,interval:'15',limit:'80'});const data=d?.result?.list||[];if(!data.length)throw new Error('Bybit kline kosong');scannerKlineCache.set(sym,{at:Date.now(),data});return data;}
+const IDR=16000; const fmtP=n=>Number(n||0).toLocaleString('en-US',{maximumFractionDigits:priceDecimals(n)}); const fmtIDR=n=>'Rp '+Math.round(n||0).toLocaleString('id-ID');
+function priceDecimals(n){n=Math.abs(Number(n)||0);if(n>=1000)return 2;if(n>=100)return 3;if(n>=1)return 4;if(n>=0.1)return 5;if(n>=0.01)return 6;if(n>=0.001)return 7;return 8}
+function fmtTradeP(n){const d=priceDecimals(n);return Number(n||0).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d})}
+
+function clearPositionVisuals(){ positionPriceLines=[]; if(chart)chart.setPosition(null); }
+function renderTradeVisuals(){
+ if(!chart)return;
+ try{
+  chart.setPosition(paperPos&&hasValidPaperPosition()?paperPos:null);
+  chart.setMarkers(tradeMarkers.filter(m=>m&&m.symbol===symbol));
+  if(srActive)chart.setSR(sr(candles));
+ }catch(e){log('Trade visual render error: '+e.message)}
+}
+function addTradeMarker(type,p){
+ if(!p)return;
+ const t=Math.floor(Number(p.entryCandleTime||p.opened||Date.now()/1000));
+ tradeMarkers.push({symbol:p.symbol||symbol,time:t,position:p.side==='BUY'?'belowBar':'aboveBar',color:p.side==='BUY'?'#19d59a':'#ff5c72',shape:p.side==='BUY'?'arrowUp':'arrowDown',text:`AUTO ${p.side} ${fmtTradeP(p.entry)}`});
+ if(tradeMarkers.length>50)tradeMarkers=tradeMarkers.slice(-50);
+ renderTradeVisuals();
+}
+function getPairLossStreak(sym=symbol){return Math.max(0,Number(pairLossStreak?.[sym])||0)}
+function isPairLossBlocked(sym=symbol){return Number(pairCooldownUntil?.[sym]||0)>Date.now()}
+function blockPairAfterLoss(sym=symbol){pairCooldownUntil[sym]=Date.now()+PAIR_LOSS_COOLDOWN_MS;return pairCooldownUntil[sym]}
+function updatePairLossUI(sym=symbol){const n=getPairLossStreak(sym),until=Number(pairCooldownUntil?.[sym]||0),blocked=until>Date.now();if($('#pairLossSymbol'))$('#pairLossSymbol').textContent=sym;if($('#pairLossStreak')){const el=$('#pairLossStreak');el.textContent=blocked?`1 / 1 · ${Math.ceil((until-Date.now())/60000)}m`:`${n} / 1`;el.className=blocked?'down':n>0?'yellow':'up'}}
+function persist(){try{localStorage.setItem('ilhamPaperState',JSON.stringify({date:new Date().toISOString().slice(0,10),symbol,paperPos,paperPnl,dailyPnl,lossStreak,pairLossStreak,pairCooldownUntil,tradeStats,tradeHistory,tradeMarkers,margin:+$('#margin').value||DEFAULT_PAPER_MARGIN_IDR,leverage:+$('#lev').value||DEFAULT_LEVERAGE,maxFloatLoss:HARD_RISK_PCT,profitGiveback:+$('#profitGiveback').value||35,negativeScans:+$('#negativeScans').value||1,autoRotate:$('#autoRotate').checked}))}catch{}}
+function restore(){try{let x=JSON.parse(localStorage.getItem('ilhamPaperState')||'null');if(!x||x.date!==new Date().toISOString().slice(0,10))return;symbol=x.symbol||symbol;paperPos=x.paperPos||null;tradeHistory=Array.isArray(x.tradeHistory)?x.tradeHistory:[];paperPnl=tradeHistory.reduce((a,t)=>a+Number(t.pnl||0),0);tradeStats={wins:tradeHistory.filter(t=>Number(t.pnl||0)>0).length,losses:tradeHistory.filter(t=>Number(t.pnl||0)<0).length};dailyPnl=tradeHistory.reduce((a,t)=>a+Number(t.pnl||0),0);lossStreak=0;for(let i=tradeHistory.length-1;i>=0;i--){if(Number(tradeHistory[i].pnl||0)<0)lossStreak++;else break}pairLossStreak={};for(const t of tradeHistory){if(Number(t.pnl||0)<0)pairLossStreak[t.symbol]=(pairLossStreak[t.symbol]||0)+1;else pairLossStreak[t.symbol]=0}tradeMarkers=Array.isArray(x.tradeMarkers)?x.tradeMarkers.filter(m=>m&&m.symbol):[];if($('#margin'))$('#margin').value=Number(x.margin)||DEFAULT_PAPER_MARGIN_IDR;if($('#lev'))$('#lev').value=Number(x.leverage)||DEFAULT_LEVERAGE;pairCooldownUntil={};for(const t of tradeHistory){if(Number(t.pnl||0)<0){const until=Number(t.time||0)+PAIR_LOSS_COOLDOWN_MS;if(until>Date.now())pairCooldownUntil[t.symbol]=until}}if($('#maxFloatLoss'))$('#maxFloatLoss').value=HARD_RISK_PCT;if($('#profitGiveback'))$('#profitGiveback').value=Number(x.profitGiveback)||35;if($('#negativeScans'))$('#negativeScans').value=Number(x.negativeScans)||1;if($('#autoRotate'))$('#autoRotate').checked=x.autoRotate!==false;if(!hasValidPaperPosition())paperPos=null;killed=false;updatePaperAccount(0);renderPaperOrderPreview();$('#dailyLossOut').textContent=fmtIDR(dailyPnl);$('#lossStreak').textContent=lossStreak;updatePairLossUI(symbol);log('Paper state reconciled from trade history · KILL SWITCH tetap OFF saat startup')}catch(e){log('Paper restore error: '+e.message)}}
+function log(s){const e=document.createElement('div');e.className='log';e.textContent=new Date().toLocaleTimeString('id-ID')+' · '+s;$('#logs').prepend(e)}
+function ema(vals,p=20){let k=2/(p+1),e=vals[0],out=[];vals.forEach((v,i)=>{e=i? v*k+e*(1-k):v;out.push(e)});return out}
+function atr(cs=candles){if(cs.length<20)return 0;let a=[];for(let i=1;i<cs.length;i++)a.push(Math.max(cs[i].high-cs[i].low,Math.abs(cs[i].high-cs[i-1].close),Math.abs(cs[i].low-cs[i-1].close)));return a.slice(-14).reduce((x,y)=>x+y,0)/Math.min(14,a.length)}
+function sr(cs=candles){let h=[],l=[];for(let i=2;i<cs.length-2;i++){if(cs[i].high>cs[i-1].high&&cs[i].high>cs[i+1].high)h.push(cs[i].high);if(cs[i].low<cs[i-1].low&&cs[i].low<cs[i+1].low)l.push(cs[i].low)}let p=cs.at(-1)?.close||0;let resistance=h.filter(x=>x>p).sort((a,b)=>a-b)[0]||Math.max(...cs.slice(-40).map(x=>x.high));let support=l.filter(x=>x<p).sort((a,b)=>b-a)[0]||Math.min(...cs.slice(-40).map(x=>x.low));return{support,resistance}}
+function analyzeData(cs){
+ if(cs.length<30)return null;
+ const c=cs.at(-1),p=cs.at(-2),cl=cs.map(x=>x.close),es=ema(cl),e=es.at(-1),A=atr(cs),{support,resistance}=sr(cs);
+ const body=Math.abs(c.close-c.open),range=Math.max(c.high-c.low,Number.EPSILON),wU=c.high-Math.max(c.open,c.close),wL=Math.min(c.open,c.close)-c.low;
+ const bodyPct=body/range, bull=c.close>c.open,bear=c.close<c.open, trend=c.close>=e?1:-1;
+ const momentum=(c.close-p.close)/(A||Math.max(c.close*.001,1));
+ const avgVol=cs.slice(-21,-1).reduce((a,x)=>a+x.volume,0)/20,vol=avgVol?c.volume/avgVol:1;
+ const prev20=cs.slice(-21,-1), hi=Math.max(...prev20.map(x=>x.high)),lo=Math.min(...prev20.map(x=>x.low));
+ const breakoutLong=c.close>hi,breakoutShort=c.close<lo;
+ const nearRes=Math.abs(c.close-resistance)/(A||1)<1.25,nearSup=Math.abs(c.close-support)/(A||1)<1.25;
+ const rejectLong=wL>Math.max(body*1.35,A*.15)&&c.close>c.open, rejectShort=wU>Math.max(body*1.35,A*.15)&&c.close<c.open;
+ const emaSlope=es.length>5?(e-es.at(-6))/(A||1):0;
+ const regime=Math.abs(momentum)>2.8?'EXTREME VOLATILITY':Math.abs(momentum)>1.6?'HIGH VOLATILITY':Math.abs(momentum)<.35?'RANGE':'TREND';
+ let long=0,short=0;
+ long+=trend===1?20:0; short+=trend===-1?20:0;
+ long+=emaSlope>0?10:0; short+=emaSlope<0?10:0;
+ long+=momentum>0?Math.min(15,Math.max(0,momentum*7)):0; short+=momentum<0?Math.min(15,Math.max(0,-momentum*7)):0;
+ long+=vol>=1.15?10:vol>=.8?5:0; short+=vol>=1.15?10:vol>=.8?5:0;
+ long+=breakoutLong?20:rejectLong?10:nearSup?5:0; short+=breakoutShort?20:rejectShort?10:nearRes?5:0;
+ long+=bull&&bodyPct>=.45?10:0; short+=bear&&bodyPct>=.45?10:0;
+ if(regime==='RANGE'){long-=8;short-=8} if(regime==='EXTREME VOLATILITY'){long-=12;short-=12}
+ long=Math.max(0,Math.min(100,long)); short=Math.max(0,Math.min(100,short));
+ const score=Math.max(long,short);
+ // Direction is score-led, with a small LONG preference. A SHORT must have clearly stronger evidence.
+ const bias=long>=short-LONG_PREFERENCE_GAP&&long>0?'LONG':short>long+LONG_PREFERENCE_GAP?'SHORT':bull?'LONG':bear?'SHORT':'NEUTRAL';
+ const reasons=[];
+ if(regime==='EXTREME VOLATILITY')reasons.push('volatilitas ekstrem');
+ if(Math.abs(momentum)<.20)reasons.push('momentum sangat lemah');
+ if(vol<.65)reasons.push('volume relatif rendah');
+ if(bias==='NEUTRAL')reasons.push('LONG/SHORT belum unggul');
+ if(score<60)reasons.push('score rendah — TIDAK lagi menjadi syarat entry');
+ if(bias==='LONG'&&c.close<e)reasons.push('harga belum konfirmasi EMA20');
+ if(bias==='SHORT'&&c.close>e)reasons.push('harga belum konfirmasi EMA20');
+ // ACTIVE CANDLE MODE: score/confidence 60% is informational only.
+ // Entry is driven primarily by the current 15M candle direction + real-time momentum.
+ const longSetup=bull&&bodyPct>=0.30&&momentum>0.08&&!nearRes&&regime!=='EXTREME VOLATILITY';
+ const shortSetup=bear&&bodyPct>=0.30&&momentum<-0.08&&!nearSup&&regime!=='EXTREME VOLATILITY';
+ if(bias==='LONG'&&!longSetup)reasons.push('candle LONG belum cukup kuat');
+ if(bias==='SHORT'&&!shortSetup)reasons.push('candle SHORT belum cukup kuat');
+ const shortApproved=shortSetup&&short>long+LONG_PREFERENCE_GAP;
+ const allowed=regime!=='EXTREME VOLATILITY'&&((bias==='LONG'&&longSetup)||(bias==='SHORT'&&shortApproved));
+ const slDist=Math.max(A*.8,c.close*.004),rr=2,tpDist=slDist*rr;
+ return {c,e,A,support,resistance,body,range,wU,wL,bodyPct,bull,bear,trend,momentum,vol,breakoutLong,breakoutShort,rejectLong,rejectShort,nearRes,nearSup,emaSlope,regime,longScore:long,shortScore:short,score,bias,reasons,allowed,slDist,tpDist,rr};
+}
+function analyze(){return analyzeData(candles)}
+function intervalSec(){return 900}
+function updateClockWib(){const d=new Date();const p=new Intl.DateTimeFormat('id-ID',{timeZone:'Asia/Jakarta',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).formatToParts(d);const g=t=>p.find(x=>x.type===t)?.value||'';const el=$('#clockWib');if(el)el.textContent=`WIB ${g('hour')}:${g('minute')}:${g('second')}`;}
+function updateUI(){updateClockWib();let a=analyze();if(!a)return;const displayPrice=livePrice||a.c.close;$('#lastPrice').textContent=fmtP(displayPrice);$('#ohlc').textContent=`O ${fmtP(a.c.open)} · H ${fmtP(a.c.high)} · L ${fmtP(a.c.low)} · C ${fmtP(a.c.close)}`;$('#candleDir').textContent=a.bull?'CANDLE BULLISH':a.bear?'CANDLE BEARISH':'DOJI';$('#candleDir').className='tag '+(a.bull?'up':a.bear?'down':'yellow');$('#ema').textContent=fmtP(a.e);$('#confidence').textContent=a.score.toFixed(0)+'%';$('#confidenceBar').style.width=a.score+'%';$('#bias').textContent=a.bias;$('#bias').className=a.bias==='LONG'?'up':a.bias==='SHORT'?'down':'yellow';$('#regime').textContent='REGIME '+a.regime;$('#noTrade').textContent=a.allowed?'TRADE CHECK ✓':'NO TRADE';$('#noTrade').className='tag '+(a.allowed?'up':'down');$('#reason').textContent=`S/R ${fmtP(a.support)} / ${fmtP(a.resistance)} · ATR ${fmtP(a.A)} · Volume x${a.vol.toFixed(2)} · Wick U ${a.wU.toFixed(2)} / L ${a.wL.toFixed(2)}`;$('#engineScore').textContent=a.score.toFixed(0);$('#guardReasons').innerHTML=a.reasons.length?a.reasons.map(x=>`<div>⚠ ${x}</div>`).join(''):'<div class="up">✓ Guard conditions clear.</div>';let rem=a.c.time+intervalSec()-nowMarketMs()/1000;const remain=Math.max(0,Math.floor(rem)); const mm=Math.floor(remain/60), ss=remain%60; $('#candleTimer').textContent=`CLOSE ${mm}:${String(ss).padStart(2,'0')} · WIB`;let slPct=Number($('#slPct').value)/100,rr=Number($('#rr').value);let sl=a.bias==='SHORT'?a.c.close*(1+slPct):a.c.close*(1-slPct),tp=a.bias==='SHORT'?a.c.close*(1-slPct*rr):a.c.close*(1+slPct*rr);$('#slOut').textContent=fmtP(sl);$('#tpOut').textContent=fmtP(tp);if(hasValidPaperPosition()&&mode==='paper')updatePosition(displayPrice);else if(mode==='paper')updatePaperAccount(0);syncPaperStateUI(a);renderIndicatorPanel();updateBtHeader()}
+function initChart(){
+ const host=$('#chart');
+ if(!host)return;
+ try{
+  chart=new CanvasChart(host,{timeZone:'Asia/Jakarta'});
+  series=chart.series;
+  emaSeries=chart.emaSeries;
+  $('#conn').textContent='CHART READY · 15M · CANVAS · WIB';
+ }catch(e){
+  $('#conn').textContent='CHART ERROR';
+  log('Chart engine error: '+e.message);
+ }
+}
+function redraw(){
+ if(!candles.length)return;
+ try{
+  if(chart){
+   chart.setCandles(candles);
+   chart.setEMA(ema(candles.map(c=>c.close)));
+   chart.setPosition(paperPos&&hasValidPaperPosition()?paperPos:null);
+   chart.setMarkers(tradeMarkers.filter(m=>m&&m.symbol===symbol));
+   if(srActive)chart.setSR(sr(candles)); else chart.setSR(null);
+   chart.fitContent();
+  }
+ }catch(e){log('Chart render error: '+e.message)}
+ updateUI();
+}
+let wsReconnectTimer=null, wsWatchdogTimer=null, wsGeneration=0, lastWsKlineAt=0, lastWsTickerAt=0, lastWsSource='NONE', lastRestSyncAt=0, lastRestKlineTime=0, restBusy=false, marketSeq=0, livePrice=0, liveMarkPrice=0, livePriceRaf=0;
+function cacheKey(s=symbol){return `ilhamMarketCandles:${marketProvider}:${s}:15m`}
+function saveCandleCache(s=symbol){try{if(candles.length>=30)localStorage.setItem(cacheKey(s),JSON.stringify({savedAt:Date.now(),candles:candles.slice(-150)}))}catch{}}
+function loadCandleCache(s=symbol){try{const x=JSON.parse(localStorage.getItem(cacheKey(s)||'')||'null');if(!x||!Array.isArray(x.candles)||x.candles.length<30)return false;const age=Date.now()-Number(x.savedAt||0);if(age>12*60*60*1000)return false;candles=x.candles.map(c=>({...c,time:Number(c.time)})).filter(c=>[c.time,c.open,c.high,c.low,c.close,c.volume].every(Number.isFinite)).slice(-150);redraw();return candles.length>=30}catch{return false}}
+async function loadCandles(targetSymbol=symbol, gen=symbolGeneration){
+ let last='unknown';
+ for(let attempt=1;attempt<=2;attempt++){
+  try{
+   const next=await fetchMarketKlines(targetSymbol,150);
+   if(next.length<30)throw new Error('Candle 15M kurang dari 30 bar');
+   if(gen!==symbolGeneration||targetSymbol!==symbol)return false;
+   candles=next.slice(-150); lastRestKlineTime=candles.at(-1)?.time||0; saveCandleCache(targetSymbol); redraw();
+   $('#conn').textContent=`${marketProvider} HISTORY · ${marketSource} · 15M`; return true;
+  }catch(e){last=e.message;if(gen!==symbolGeneration||targetSymbol!==symbol)return false;await new Promise(r=>setTimeout(r,700*attempt));}
+ }
+ if(gen===symbolGeneration&&targetSymbol===symbol){
+   if(loadCandleCache(targetSymbol)){$('#conn').textContent=`STALE ${marketProvider} HISTORY · WAITING MARKET`;log(`History unavailable · cached ${targetSymbol} candles shown temporarily`);return true;}
+   log(`History unavailable · ${last}`); return false;
+ }
+ return false;
+}
+function applyLiveKline(k,targetSymbol=symbol,gen=symbolGeneration,source='ws'){
+ if(gen!==symbolGeneration||targetSymbol!==symbol)return false;
+ const c={time:Math.floor(Number(k.t)/1000),open:+k.o,high:+k.h,low:+k.l,close:+k.c,volume:+k.v};
+ if(![c.time,c.open,c.high,c.low,c.close,c.volume].every(Number.isFinite))return false;
+ const current=candles.at(-1);
+ // REST reconciliation never overwrites a newer WS tick inside the same candle.
+ // It may replace the candle when WS is unavailable/stale, or when the candle rolls.
+ if(source==='rest' && current && c.time===current.time && ws&&ws.readyState===1 && Date.now()-lastWsKlineAt<3500) return false;
+ const i=candles.findIndex(x=>x.time===c.time);
+ if(i>=0)candles[i]=c; else candles.push(c);
+ candles.sort((a,b)=>a.time-b.time);
+ if(candles.length>150)candles=candles.slice(-150);
+ lastRestKlineTime=Math.max(lastRestKlineTime,c.time);
+ saveCandleCache(targetSymbol);
+ if(series)series.update({time:c.time,open:c.open,high:c.high,low:c.low,close:c.close});
+ const ev=ema(candles.map(x=>x.close)).at(-1);
+ if(emaSeries&&Number.isFinite(ev))emaSeries.update({time:c.time,value:ev});
+ updateUI(); renderTradeVisuals();
+ if((mode==='paper'||mode==='demo')&&auto&&!killed&&!hunterBusy){clearTimeout(window.__momentumScanTimer);window.__momentumScanTimer=setTimeout(()=>scan().catch(()=>{}),900);}
+ return true;
+}
+function setRealtimeStatus(extra=''){
+ const wsLive=!!(ws&&ws.readyState===1);
+ const wsFresh=!!(lastWsKlineAt&&Date.now()-lastWsKlineAt<5000);
+ const age=lastRestSyncAt?Math.max(0,Date.now()-lastRestSyncAt):null;
+ const fresh=age!==null&&age<4000;
+ $('#conn').textContent=fresh
+   ? `${marketProvider} REALTIME · REST SYNC${wsLive?' + WS':''}${extra?' · '+extra:''}`
+   : (wsFresh?`${marketProvider} WS LIVE · REST FALLBACK READY`:(wsLive?`${marketProvider} WS CONNECTED · WAITING TICK`:`${marketProvider} REST RECONNECTING`));
+}
+function scheduleWsReconnect(gen,targetSymbol){
+ clearTimeout(wsReconnectTimer);
+ wsReconnectTimer=setTimeout(()=>{if(gen===wsGeneration&&gen===symbolGeneration&&targetSymbol===symbol)connectWS(targetSymbol,gen)},1200);
+}
+function connectWS(targetSymbol=symbol,gen=symbolGeneration){
+ const wsGen=++wsGeneration;clearTimeout(wsReconnectTimer);clearInterval(wsWatchdogTimer);try{ws?.close()}catch{};lastWsKlineAt=0;lastWsTickerAt=0;livePrice=0;liveMarkPrice=0;const klineStream=`kline.15.${targetSymbol.toUpperCase()}`,tickerStream=`tickers.${targetSymbol.toUpperCase()}`;lastWsSource='BYBIT LINEAR';$('#conn').textContent=`BYBIT WS CONNECTING · ${lastWsSource} · TICKER LIVE + KLINE`;
+ try{ws=new WebSocket(BYBIT_WS);ws.onopen=()=>{if(wsGen!==wsGeneration||gen!==symbolGeneration)return;ws.send(JSON.stringify({op:'subscribe',args:[klineStream,tickerStream]}));setRealtimeStatus('TICKER LIVE + KLINE')};ws.onmessage=ev=>{if(wsGen!==wsGeneration||gen!==symbolGeneration)return;try{const m=JSON.parse(ev.data);if(m.topic===klineStream&&Array.isArray(m.data)&&m.data[0]){const q=m.data[0];lastWsKlineAt=Date.now();const ok=applyLiveKline({t:q.start,o:q.open,h:q.high,l:q.low,c:q.close,v:q.volume},targetSymbol,gen,'ws');if(ok)setRealtimeStatus(lastWsSource)}else if(m.topic===tickerStream&&m.data){const q=Array.isArray(m.data)?m.data[0]:m.data;const px=Number(q.lastPrice||q.markPrice||0),mark=Number(q.markPrice||q.lastPrice||0);if(px>0){livePrice=px;liveMarkPrice=mark;lastWsTickerAt=Date.now();requestLivePnL();}}}catch{}};ws.onerror=()=>{if(wsGen===wsGeneration)$('#conn').textContent='BYBIT WS ERROR · TICKER/REST FALLBACK'};ws.onclose=()=>{if(wsGen===wsGeneration){clearInterval(wsWatchdogTimer);$('#conn').textContent='BYBIT WS RECONNECTING · TICKER + REST';scheduleWsReconnect(gen,targetSymbol)}};wsWatchdogTimer=setInterval(()=>{if(wsGen!==wsGeneration||gen!==symbolGeneration)return;if(ws?.readyState===1&&lastWsKlineAt&&Date.now()-lastWsKlineAt>12000&&lastWsTickerAt&&Date.now()-lastWsTickerAt>5000){$('#conn').textContent='BYBIT WS STALE · REST AUTHORITATIVE';try{ws.close()}catch{}}},2000)}catch(e){$('#conn').textContent='BYBIT WS FAILED · REST SYNC ACTIVE';scheduleWsReconnect(gen,targetSymbol)}}
+function requestLivePnL(){if(livePriceRaf)return;livePriceRaf=requestAnimationFrame(()=>{livePriceRaf=0;const px=livePrice||analyze()?.c?.close||paperPos?.entry||0;if(px>0){$('#lastPrice').textContent=fmtP(px);if(mode==='paper'&&hasValidPaperPosition())updatePosition(px);else if(mode==='paper')updatePaperAccount(0);if(mode==='demo')updateDemoLiveUnrealized(liveMarkPrice||px);}})}
+function updateDemoLiveUnrealized(price){const p=currentDemoPosition();if(!p||!price)return;const side=demoPositionSide(p),entry=Number(p.avgPrice||0),qty=demoPositionQty(p),dir=side==='BUY'?1:-1;const upl=(price-entry)*qty*dir*IDR;$('#unrealized').textContent=fmtIDR(upl);$('#perfLive').textContent=`Posisi ${side} ${p.symbol} · Entry ${fmtTradeP(entry)} · Unrealized ${fmtIDR(upl)} · LIVE`;const pnlEl=$('#position')?.querySelector('.metric:nth-child(2)');return upl}
+
+async function reconcileRealtime(){
+ if(restBusy||!candles.length)return;
+ const targetSymbol=symbol,gen=symbolGeneration,seq=++marketSeq; restBusy=true;
+ try{
+  const d=marketProvider==='BYBIT'?await fetchBybitKlines(targetSymbol,2):await fetchMarketKlines(targetSymbol,2);
+  if(seq!==marketSeq||gen!==symbolGeneration||targetSymbol!==symbol)return;
+  const k=Array.isArray(d)&&d.length?d[d.length-1]:null; if(!k)throw new Error('Realtime kline kosong');
+  const changed=applyLiveKline({t:k.time,o:k.open,h:k.high,l:k.low,c:k.close,v:k.volume},targetSymbol,gen,'rest');
+  lastRestSyncAt=Date.now();
+  if(changed||!ws||ws.readyState!==1)setRealtimeStatus(`${marketProvider} · SYNC ${new Date(lastRestSyncAt).toLocaleTimeString('id-ID',{hour12:false})}`); else setRealtimeStatus(lastWsSource);
+ }catch(e){if(gen===symbolGeneration&&targetSymbol===symbol)$('#conn').textContent=`${marketProvider} REST SYNC ERROR · ${e.message}`;}finally{restBusy=false}
+}
+
+async function switchSymbol(s){
+ if(s===symbol&&candles.length)return;
+ const gen=++symbolGeneration;
+ try{drawings.forEach(x=>x.remove?.())}catch{} drawings=[]; tradeMarkers=tradeMarkers.filter(m=>m&&m.symbol===s); clearPositionVisuals();
+ try{ws?.close()}catch{} clearTimeout(wsReconnectTimer); clearInterval(wsWatchdogTimer);
+ symbol=s; candles=[]; $('#symbolTitle').textContent=s; updatePairLossUI(s); $('#conn').textContent='LOADING '+s+' · MARKET DATA'; lastSwitchAt=Date.now(); redraw();
+ const ok=await loadCandles(s,gen);
+ if(!ok||gen!==symbolGeneration||s!==symbol)return;
+ if(chart)chart.fitContent(); renderTradeVisuals(); connectWS(s,gen); updateBtHeader(); loadBtOrderBook(); persist(); log('Pair → '+s+' · '+marketProvider+' 15M synced');
+}
+function drawSR(){
+ if(!chart)return;
+ srActive=!srActive;
+ chart.setSR(srActive?sr(candles):null);
+}
+function drawClick(ev){
+ // Drawing tools are handled by the canvas engine; keep this handler for compatibility.
+ if(chart&&typeof chart.handleClick==='function')chart.handleClick(ev,tool);
+ if(tool!=='none'){tool='none';$$('[data-tool]').forEach(x=>x.classList.remove('active'));$('[data-tool="none"]').classList.add('active');}
+}
+function currentPaperPnl(price){if(!hasValidPaperPosition())return 0;const p=paperPos,dir=p.side==='BUY'?1:-1,raw=(price-p.entry)*p.qty*dir,fee=(Math.abs(p.entry*p.qty)+Math.abs(price*p.qty))*Number($('#fee').value)/100,slip=Math.abs(price*p.qty)*Number($('#slippage').value)/100;return (raw-fee-slip)*IDR}
+function lossExitReason(current,best){if(!hasValidPaperPosition())return null;const p=paperPos;if(isPairLossBlocked(p.symbol))return `PAIR COOLDOWN · ${p.symbol} dilewati setelah 1 LOSS`;if(!$('#autoRotate')?.checked)return null;const price=current?.c?.close||p.entry,pnl=currentPaperPnl(price),currentEquity=Math.max(1,accountEquity+paperPnl),maxLoss=(0.20/100)*currentEquity;p.negativeScans=pnl<0?(Number(p.negativeScans)||0)+1:0;const sameBias=current?.bias===(p.side==='BUY'?'LONG':'SHORT');const oppositeCandle=pnl<0&&current&&((p.side==='BUY'&&current.bear&&current.bodyPct>=0.25)||(p.side==='SELL'&&current.bull&&current.bodyPct>=0.25));const invalid=!current?.allowed||!sameBias;const better=best&&best.symbol!==p.symbol;const negativeLimit=Math.max(1,Number($('#negativeScans').value)||1);const losingTooLong=pnl<0&&p.negativeScans>=negativeLimit&&best&&best.symbol!==p.symbol;const givebackPct=Math.min(100,Math.max(1,Number($('#profitGiveback').value)||35))/100;const peak=Number(p.peakPnl||0);if(peak>0&&pnl>0&&pnl<=peak*(1-givebackPct))return `PROFIT GIVEBACK ${fmtIDR(peak-pnl)} · ${((peak-pnl)/peak*100).toFixed(1)}% dari peak`;if(pnl<0&&Math.abs(pnl)>=maxLoss)return `FLOATING LOSS ${fmtIDR(pnl)} >= limit ${fmtIDR(-maxLoss)}`;if(pnl<0&&oppositeCandle)return `CANDLE BERBALIK · ${p.side} · LOSS ${fmtIDR(pnl)} · LANGSUNG TUTUP & CARI PAIR LAIN`;if(pnl<0&&invalid)return `SETUP BERUBAH · ${current?.bias||'NO SIGNAL'} · LANGSUNG EVALUASI`;if(pnl<0&&losingTooLong)return `MINUS TERUS ${p.negativeScans}x · ROTATE ${best.symbol}`;if(pnl<0&&better)return `BETTER PAIR · ${best.symbol}`;return null}
+async function scan(){
+ if(hunterBusy)return; hunterBusy=true; $('#scanState').textContent='SCANNING BYBIT…';
+ try{
+  const td=await bybitPublic('/v5/market/tickers',{category:'linear'});
+  const all=(td?.result?.list||[]).filter(x=>/USDT$/.test(x.symbol)&&!x.symbol.includes('_')&&Number(x.turnover24h)>0&&x.symbol!=='USDCUSDT');
+  const sorted=[...all].sort((a,b)=>Math.abs(Number(b.price24hPcnt))-Math.abs(Number(a.price24hPcnt)));
+  const volume=[...all].sort((a,b)=>Number(b.turnover24h)-Number(a.turnover24h));
+  const universe=[...new Map([...sorted.slice(0,18),...volume.slice(0,18)].map(x=>[x.symbol,x])).values()].slice(0,24);
+  const gainers=[...all].sort((a,b)=>Number(b.price24hPcnt)-Number(a.price24hPcnt)).slice(0,5), losers=[...all].sort((a,b)=>Number(a.price24hPcnt)-Number(b.price24hPcnt)).slice(0,5);
+  $('#symbols').innerHTML=universe.map(x=>`<div class="sym ${x.symbol===symbol?'active':''}" data-s="${x.symbol}"><div><b>${x.symbol}</b><div class="muted">Vol ${(Number(x.turnover24h)/1e6).toFixed(1)}M</div></div><b class="${Number(x.price24hPcnt)>=0?'up':'down'}">${Number(x.price24hPcnt)>=0?'+':''}${(Number(x.price24hPcnt)*100).toFixed(2)}%</b></div>`).join('');
+  $$('.sym').forEach(e=>e.onclick=()=>switchSymbol(e.dataset.s));
+  $('#leaders').innerHTML='<div class="muted">Top Gainers</div>'+gainers.map(x=>`<div class="kv"><span>${x.symbol}</span><b class="up">+${(Number(x.price24hPcnt)*100).toFixed(2)}%</b></div>`).join('')+'<div class="muted" style="margin-top:8px">Top Losers</div>'+losers.map(x=>`<div class="kv"><span>${x.symbol}</span><b class="down">${(Number(x.price24hPcnt)*100).toFixed(2)}%</b></div>`).join('');
+  if(auto&&!killed&&(mode==='paper'||mode==='demo')&&Date.now()-lastSwitchAt>=HUNTER.cooldownMs){
+   const results=await Promise.all(universe.map(async x=>{try{const d=await bybitPublic('/v5/market/kline',{category:'linear',symbol:x.symbol,interval:'15',limit:'80'});const kd=(d?.result?.list||[]).slice().reverse();const cs=kd.map(k=>({time:Math.floor(Number(k[0])/1000),open:+k[1],high:+k[2],low:+k[3],close:+k[4],volume:+k[5]}));const a=analyzeData(cs);if(!a||!a.allowed)return null;return {symbol:x.symbol,score:a.score,bias:a.bias,analysis:a,change:Number(x.price24hPcnt)*100,volume:Number(x.turnover24h)};}catch{return null}}));
+   const ranked=results.filter(x=>x&&!isPairLossBlocked(x.symbol)&&!(x.symbol===rotateAwaySymbol&&Date.now()<rotateAwayUntil)).map(x=>({...x,rankScore:x.score+(x.bias==='LONG'?3:0)})).sort((a,b)=>b.rankScore-a.rankScore),best=ranked[0],current=mode==='paper'?(paperPos?analyze():null):((currentDemoPosition()&&symbol)?analyze():null),currentScore=current?.score||0,demoActive=mode==='demo'&&!!currentDemoPosition(),active=mode==='paper'?hasValidPaperPosition():demoActive,exitReason=mode==='paper'?(active?lossExitReason(current,best):null):(demoActive?demoLossExitReason(currentDemoPosition()):null);
+   const isLossExit=!!exitReason&&/(LOSS|CANDLE BERBALIK|SETUP BERUBAH|MINUS TERUS|COOLDOWN)/i.test(exitReason);
+   const isProfitGiveback=!!exitReason&&exitReason.startsWith('PROFIT GIVEBACK');const activeSymbol=mode==='paper'?paperPos?.symbol:currentDemoPosition()?.symbol;const canRotate=active&&exitReason&&best&&((best.symbol!==activeSymbol)||isProfitGiveback||isLossExit);
+   if(best&&(!active||canRotate)){
+    const oldSymbol=activeSymbol;
+    if(active&&exitReason){if(mode==='paper'){const mark=current?.c.close||paperPos.entry;const livePnl=currentPaperPnl(mark);closePaper(mark,livePnl,exitReason);log(`HUNTER EXIT → ${oldSymbol} · ${exitReason} · ${fmtIDR(livePnl)}`);}else{await closeDemoPosition(currentDemoPosition(),exitReason);}}
+    await switchSymbol(best.symbol);const fresh=analyze();if(fresh&&fresh.allowed&&fresh.bias===best.bias){if(mode==='paper'){const reopened=openPaper(fresh.bias==='LONG'?'BUY':'SELL',fresh);if(reopened){lastHunterSymbol=best.symbol;lastHunterCandle=fresh.c.time;$('#scanState').textContent=isProfitGiveback&&best.symbol===oldSymbol?'RE-ENTRY '+fresh.bias:`ENTRY ${fresh.bias}`;log(`${isProfitGiveback&&best.symbol===oldSymbol?'AUTO RE-ENTRY':'AUTO HUNTER ENTRY'} → ${best.symbol} ${fresh.bias} @ ${fmtP(fresh.c.close)} | ${fresh.score.toFixed(0)}%`)}}else{const opened=await submitDemoAuto(fresh.bias==='LONG'?'BUY':'SELL',fresh);if(opened){lastHunterSymbol=best.symbol;lastHunterCandle=fresh.c.time;$('#scanState').textContent=`DEMO ENTRY ${fresh.bias}`;log(`AUTO DEMO ENTRY → ${best.symbol} ${fresh.bias} @ ${fmtP(fresh.c.close)} | ${fresh.score.toFixed(0)}%`)}}}}
+   else if(active&&exitReason&&!best){if(mode==='paper'){const mark=current?.c.close||paperPos.entry;const livePnl=currentPaperPnl(mark);const oldSymbol=paperPos.symbol;closePaper(mark,livePnl,exitReason);log(`AUTO EXIT → ${oldSymbol} · ${exitReason} · ${fmtIDR(livePnl)}`)}else await closeDemoPosition(currentDemoPosition(),exitReason)}
+   else if(best){const holdPnl=mode==='paper'&&paperPos?currentPaperPnl(current?.c?.close||paperPos.entry):mode==='demo'&&currentDemoPosition()?demoPnlForPosition(currentDemoPosition()):0;$('#scanState').textContent=active?`HOLD ${activeSymbol} · ${currentScore.toFixed(0)}% · ${fmtIDR(holdPnl)}`:`BEST ${best.symbol} ${best.score.toFixed(0)}%`;}else $('#scanState').textContent='NO TRADE';
+  }else{$('#scanState').textContent='BYBIT SCANNER READY'}
+ }catch(e){log('Bybit scanner error: '+e.message);$('#scanState').textContent='BYBIT SCANNER ERROR'}finally{hunterBusy=false}
+}
+function hasValidDemoPosition(){return Array.isArray(demoPositions)&&demoPositions.some(x=>Number(x.size)>0)}
+function currentDemoPosition(){return (demoPositions||[]).find(x=>x.symbol===symbol&&Number(x.size)>0)||null}
+function demoPositionSide(p){return String(p?.side||'').toLowerCase()==='buy'?'BUY':'SELL'}
+function demoPositionQty(p){return Math.abs(Number(p?.size||0))}
+function demoPnlForPosition(p){return Number(p?.unrealisedPnl||0)*IDR}
+async function fetchDemoHistory(){if(mode!=='demo')return;try{const r=await fetch('/api/closed-pnl?limit=100',{cache:'no-store'});const d=await r.json();if(!r.ok)throw Error(d.error||'Closed PnL gagal');demoHistory=(d.list||[]).map(x=>({...x,pnl:Number(x.closedPnl||0)*IDR}));demoSyncAt=Date.now();pairLossStreak={};for(const x of [...demoHistory].reverse()){if(x.pnl<0)pairLossStreak[x.symbol]=(pairLossStreak[x.symbol]||0)+1;else pairLossStreak[x.symbol]=0}renderDemoPerformance();updatePairLossUI(symbol);}catch(e){log('Demo history sync error: '+e.message)}}
+function renderDemoPerformance(){if(mode!=='demo')return;const h=demoHistory||[],wins=h.filter(x=>x.pnl>0),losses=h.filter(x=>x.pnl<0),grossWin=wins.reduce((a,x)=>a+x.pnl,0),grossLoss=Math.abs(losses.reduce((a,x)=>a+x.pnl,0));$('#perfTrades').textContent=h.length;$('#perfWin').textContent=(h.length?(wins.length/h.length*100):0).toFixed(1)+'%';$('#perfNet').textContent=fmtIDR(h.reduce((a,x)=>a+x.pnl,0));$('#perfPF').textContent=grossLoss?(grossWin/grossLoss).toFixed(2):'—';$('#perfBest').textContent=fmtIDR(h.length?Math.max(...h.map(x=>x.pnl)):0);$('#perfWorst').textContent=fmtIDR(h.length?Math.min(...h.map(x=>x.pnl)):0);$('#perfStreak').textContent=(()=>{let n=0;for(const x of h){if(x.pnl<0)n++;else break}return n})();const p=currentDemoPosition();$('#perfLive').textContent=p?`BYBIT DEMO ${demoPositionSide(p)} ${p.symbol} · Entry ${fmtTradeP(Number(p.avgPrice))} · Unrealized ${fmtIDR(demoPnlForPosition(p))}`:'BYBIT DEMO · posisi aktif: belum ada';$('#perfHistory').innerHTML=h.slice(0,8).map(x=>`<div class="log"><b>${x.symbol} ${x.side}</b> · Entry ${fmtTradeP(x.avgEntryPrice)} → Exit ${fmtTradeP(x.avgExitPrice)} · <b>${fmtIDR(x.pnl)}</b> · ${x.pnl>=0?'WIN':'LOSS'} · ${new Date(Number(x.updatedTime||x.createdTime)).toLocaleString('id-ID',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</div>`).join('')||'Belum ada trade yang ditutup.'}
+function demoLossExitReason(p){if(!p)return null;const up=Number(p.unrealisedPnl||0)*IDR;const eq=Math.max(1,Number(accountEquity));const limit=eq*0.20/100;const a=analyze();const side=demoPositionSide(p);const opposite=up<0&&a&&((side==='BUY'&&a.bear&&a.bodyPct>=0.25)||(side==='SELL'&&a.bull&&a.bodyPct>=0.25));if(up<0&&Math.abs(up)>=limit)return `DEMO HARD LOSS 0.20% · ${fmtIDR(up)}`;if(opposite)return `DEMO ACTIVE CANDLE LOSS · ${fmtIDR(up)} · TUTUP & CARI PAIR LAIN`;return null}
+async function closeDemoPosition(p,reason='AUTO EXIT'){if(!p)return false;const side=demoPositionSide(p)==='BUY'?'SELL':'BUY';try{const r=await fetch('/api/close',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:p.symbol,side,quantity:demoPositionQty(p)})});const d=await r.json();if(!r.ok)throw Error(d.error||'Demo close gagal');log(`BYBIT DEMO EXIT ${p.symbol} · ${reason}`);await account();await fetchDemoHistory();return true}catch(e){log('BYBIT DEMO EXIT ERROR: '+e.message);return false}}
+async function submitDemoAuto(side,a){if(killed||mode!=='demo')return false;if(currentDemoPosition())return false;if(isPairLossBlocked(symbol))return false;const p=a.c.close,sp=Number($('#slPct').value)/100,rr=Number($('#rr').value),sl=side==='BUY'?p*(1-sp):p*(1+sp),tp=side==='BUY'?p*(1+sp*rr):p*(1-sp*rr),q=Math.max(0.000001,Number($('#qty').value)||0.001);try{const r=await fetch('/api/bracket-order',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol,side,quantity:q,stopPrice:sl,takeProfitPrice:tp})});const d=await r.json();if(!r.ok)throw Error(d.error||'Demo order gagal');log(`BYBIT DEMO AUTO ${side} ${symbol} · qty ${q} · SL ${fmtP(sl)} · TP ${fmtP(tp)}`);await account();return true}catch(e){log('BYBIT DEMO AUTO ERROR: '+e.message);return false}}
+function hasValidPaperPosition(){return !!(paperPos&&typeof paperPos==='object'&&paperPos.symbol&&['BUY','SELL'].includes(paperPos.side)&&Number.isFinite(Number(paperPos.entry))&&Number.isFinite(Number(paperPos.qty))&&Number(paperPos.qty)>0&&Number.isFinite(Number(paperPos.sl))&&Number.isFinite(Number(paperPos.tp)))}
+function syncPaperStateUI(a=null){
+  if(!hasValidPaperPosition()){
+    if(paperPos){paperPos=null;persist()}
+    renderPosition();
+    const reasons=a?.reasons||[];
+    const statusEl=$('#engineStatus');
+    if(statusEl){
+      statusEl.className=(a?.allowed?'goodbox':'dangerbox');
+      statusEl.textContent=a?.allowed?'READY · siap entry':'NO TRADE · '+(reasons.length?reasons.join(', '):'menunggu setup');
+    }
+    return false;
+  }
+  const p=paperPos;
+  renderPosition();
+  const statusEl=$('#engineStatus');
+  if(statusEl){statusEl.className='warning';statusEl.textContent=`POSISI AKTIF · ${p.side} ${p.symbol} · Entry ${fmtTradeP(p.entry)}`;}
+  return true;
+}
+function guard(){if(killed)return['kill switch aktif'];if(isPairLossBlocked(symbol))return[`PAIR ${symbol} DIHENTIKAN · 3 LOSS BERUNTUN`];if(hasValidPaperPosition()&&Number($('#maxPos').value)<=1)return['sudah ada posisi aktif'];if(dailyPnl<=-(accountEquity*Number($('#dailyLoss').value)/100))return['daily loss limit tercapai'];let a=analyze();return a&&!a.allowed?a.reasons:[]}
+function positionSize(price,sl){let risk=accountEquity*Number($('#risk').value)/100;let dist=Math.abs(price-sl);return dist?risk/dist:Number($('#qty').value)}
+function openPaper(side,forcedAnalysis=null){
+  if(hasValidPaperPosition()){syncPaperStateUI();log(`ENTRY BLOCKED: sudah ada posisi ${paperPos.side} ${paperPos.symbol}`);return false}
+  let g=guard();
+  if(g.length){log('ENTRY BLOCKED: '+g.join(', '));let el=$('#engineStatus');if(el){el.className='dangerbox';el.textContent='NO TRADE · '+g.join(', ')}return false}
+  let a=forcedAnalysis||analyze();if(!a)return false;
+  let risk=HARD_RISK_PCT/100,sp=Number($('#slPct').value)/100,rr=Number($('#rr').value),p=a.c.close,sl=side==='BUY'?p*(1-sp):p*(1+sp),tp=side==='BUY'?p*(1+sp*rr):p*(1-sp*rr),leverage=mode==='paper'?paperLeverage():Number($('#lev').value)||1;
+  // PAPER AUTO SIZE: risk is fixed to the 0.20% hard-loss budget, not margin × leverage.
+  const riskMoney=Math.max(1,(Number(accountEquity)+Number(paperPnl))*HARD_RISK_PCT/100);
+  const exitRef=sl, feePct=Number($('#fee').value)/100, slipPct=Number($('#slippage').value)/100;
+  const riskPerUnit=(Math.abs(p-sl)+(p+exitRef)*feePct+exitRef*slipPct)*IDR;
+  const riskQty=riskPerUnit>0?riskMoney/riskPerUnit:0;
+  const manualQty=Math.max(0.000001,Number($('#qty').value)||0.001);
+  const qty=mode==='paper'?riskQty:manualQty;
+  const notional=qty*p*IDR;
+  const margin=mode==='paper'?notional/Math.max(1,leverage):0;
+  if(mode==='paper'&&margin>accountEquity+paperPnl){log(`ENTRY BLOCKED: margin ${fmtIDR(margin)} melebihi available balance`);syncPaperStateUI(a);return false;}
+  if((side==='BUY'&&(sl>=p||tp<=p))||(side==='SELL'&&(sl<=p||tp>=p))){log('ENTRY BLOCKED: SL/TP tidak valid');$('#engineStatus').className='dangerbox';$('#engineStatus').textContent='NO TRADE · SL/TP tidak valid';return false}
+  paperPos={symbol,side,entry:p,qty,sl,tp,initialSL:sl,be:false,partial:false,trail:false,opened:Date.now(),risk,margin,leverage,notional,entryCandleTime:a.c.time,entryScore:a.score,entryBias:a.bias,peakPnl:0,negativeScans:0};
+  addTradeMarker('entry',paperPos); renderTradeVisuals(); persist(); syncPaperStateUI(a); log(`AUTO/ PAPER ${side} ${symbol} · ENTRY ${fmtTradeP(p)} · SL ${fmtTradeP(sl)} · TP ${fmtTradeP(tp)} · SCORE ${a.score.toFixed(0)}%`); return true;
+}
+function renderPosition(pnl=0){if(!hasValidPaperPosition()){$('#position').innerHTML='<div class="muted">Tidak ada posisi.</div>';return}let p=paperPos;$('#position').innerHTML=`<div class="grid3"><div class="metric"><span class="muted">Side</span><b class="${p.side==='BUY'?'up':'down'}">${p.side} ${p.symbol}</b></div><div class="metric"><span class="muted">Entry</span><b>${fmtTradeP(p.entry)}</b></div><div class="metric"><span class="muted">Qty</span><b>${p.qty.toFixed(6)}</b></div></div><div class="grid3" style="margin-top:7px"><div class="metric"><span class="muted">Margin</span><b>${fmtIDR(p.margin||0)}</b></div><div class="metric"><span class="muted">Leverage</span><b>${Number(p.leverage||1)}x</b></div><div class="metric"><span class="muted">Position Size</span><b>${fmtIDR(p.notional||0)}</b></div></div><div class="grid3" style="margin-top:7px"><div class="metric"><span class="muted">SL</span><b>${fmtTradeP(p.sl)}</b></div><div class="metric"><span class="muted">TP</span><b>${fmtTradeP(p.tp)}</b></div><div class="metric"><span class="muted">PnL</span><b class="${pnl>=0?'up':'down'}">${fmtIDR(pnl)}</b></div></div><div class="kv"><span>BE / Partial / Trail</span><b>${p.be?'ON':'OFF'} / ${p.partial?'ON':'OFF'} / ${p.trail?'ON':'OFF'}</b></div><div class="kv"><span>Peak Profit / Giveback</span><b>${fmtIDR(p.peakPnl||0)} / ${Number($('#profitGiveback')?.value||35)}%</b></div>`}
+
+function csvCell(v){const s=String(v??'');return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s}function downloadTradeHistory(){if(mode==='demo'){if(!demoHistory.length){alert('Belum ada history Demo Bybit yang tersedia.');return}const header=['Tanggal','Pair','Side','Entry','Exit','Qty','Leverage','PnL USDT','PnL IDR','Order ID'];const rows=demoHistory.map(x=>[new Date(Number(x.updatedTime||x.createdTime)).toLocaleString('id-ID'),x.symbol,x.side,x.avgEntryPrice,x.avgExitPrice,x.closedSize,x.leverage,Number(x.closedPnl||0).toFixed(8),Number(x.pnl||0).toFixed(2),x.orderId]);const csv='\uFEFF'+[header,...rows].map(r=>r.map(csvCell).join(',')).join('\n');const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`bybit-demo-closed-pnl-${new Date().toISOString().slice(0,10)}.csv`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);return}if(!tradeHistory.length){alert('Belum ada history trade yang bisa di-download.');return}const header=['Tanggal','Pair','Side','Entry','Exit','Qty','Margin IDR','Leverage','PnL IDR','Hasil','Alasan'];const rows=tradeHistory.map(x=>[new Date(x.time).toLocaleString('id-ID'),x.symbol,x.side,x.entry??'',x.exit??'',x.qty??'',x.margin??'',x.leverage??'',Number(x.pnl||0).toFixed(2),x.result,x.reason||'']);const csv='\uFEFF'+[header,...rows].map(r=>r.map(csvCell).join(',')).join('\n');const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`v10-trade-history-${new Date().toISOString().slice(0,10)}.csv`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000)}function downloadTradeJpg(){
+ const rows=(mode==='demo'?demoHistory.map(x=>({time:Number(x.updatedTime||x.createdTime||Date.now()),symbol:x.symbol,side:x.side,entry:x.avgEntryPrice,exit:x.avgExitPrice,pnl:Number(x.closedPnl||0)*IDR,result:Number(x.closedPnl||0)>=0?'WIN':'LOSS',reason:'BYBIT DEMO'})):tradeHistory).slice().reverse().slice(0,18);
+ const w=1400, rowH=34, h=Math.max(760,330+rows.length*rowH); const cv=document.createElement('canvas');cv.width=w;cv.height=h;const c=cv.getContext('2d');
+ c.fillStyle='#07101a';c.fillRect(0,0,w,h);c.fillStyle='#0d1825';c.fillRect(35,30,w-70,92);
+ c.fillStyle='#f4c44f';c.font='bold 24px Arial';c.fillText('⚡ ILHAM NOVANDI',58,67);c.fillStyle='#e9f0f8';c.font='bold 19px Arial';c.fillText('FUTURES COMMAND CENTER · BYBIT',58,96);
+ c.fillStyle='#7f90a6';c.font='14px Arial';c.fillText(new Date().toLocaleString('id-ID'),w-310,67);c.fillText('PAPER / DEMO · 15M',w-310,94);
+ const stats=[['TOTAL TRADE',mode==='demo'?rows.length:tradeHistory.length],['WIN RATE',mode==='demo'?(rows.length?((rows.filter(x=>x.result==='WIN').length/rows.length)*100).toFixed(1)+'%': '0%'):(tradeHistory.length?((tradeStats.wins/tradeHistory.length)*100).toFixed(1)+'%':'0%')],['NET PNL',fmtIDR(mode==='demo'?demoHistory.reduce((a,x)=>a+Number(x.closedPnl||0)*IDR,0):paperPnl)],['ACTIVE PAIR',symbol]];
+ stats.forEach((x,i)=>{const xx=35+i*332;c.fillStyle='#0d1825';c.fillRect(xx,145,310,86);c.fillStyle='#7f90a6';c.font='12px Arial';c.fillText(x[0],xx+16,169);c.fillStyle='#e9f0f8';c.font='bold 22px Arial';c.fillText(String(x[1]),xx+16,204)});
+ c.fillStyle='#e9f0f8';c.font='bold 16px Arial';c.fillText('TRADE HISTORY',52,270);const cols=[['WAKTU',52],['PAIR',245],['SIDE',470],['ENTRY',600],['EXIT',760],['PNL',920],['HASIL',1080],['ALASAN',1190]];
+ c.fillStyle='#101d2b';c.fillRect(35,290,w-70,34);c.fillStyle='#7f90a6';c.font='bold 11px Arial';cols.forEach(([t,x])=>c.fillText(t,x,312));
+ rows.forEach((r,i)=>{const y=324+i*rowH;if(i%2===0){c.fillStyle='#0a141f';c.fillRect(35,y,w-70,rowH)}c.fillStyle='#c8d3df';c.font='12px Arial';c.fillText(new Date(r.time||Date.now()).toLocaleString('id-ID',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}),52,y+22);c.fillText(String(r.symbol||'-'),245,y+22);c.fillText(String(r.side||'-'),470,y+22);c.fillText(String(r.entry??'-'),600,y+22);c.fillText(String(r.exit??'-'),760,y+22);const pnl=Number(r.pnl||0);c.fillStyle=pnl>=0?'#19d59a':'#ff5c72';c.font='bold 12px Arial';c.fillText(fmtIDR(pnl),920,y+22);c.fillText(String(r.result||'-'),1080,y+22);c.fillStyle='#aab8c7';c.font='11px Arial';c.fillText(String(r.reason||'-').slice(0,30),1190,y+22)});
+ c.fillStyle='#5f7185';c.font='11px Arial';c.fillText('Untuk jurnal/review · bukan jaminan profit',52,h-25);
+ const a=document.createElement('a');a.href=cv.toDataURL('image/jpeg',0.92);a.download=`ilham-novandi-bybit-report-${new Date().toISOString().slice(0,10)}.jpg`;document.body.appendChild(a);a.click();a.remove();
+}
+function renderPerformance(unrealized=0){const n=tradeHistory.length,w=tradeStats.wins,l=tradeStats.losses,net=paperPnl,grossWin=tradeHistory.filter(x=>x.pnl>0).reduce((a,x)=>a+x.pnl,0),grossLoss=Math.abs(tradeHistory.filter(x=>x.pnl<0).reduce((a,x)=>a+x.pnl,0));$('#perfTrades').textContent=n;$('#perfWin').textContent=(n?((w/n)*100).toFixed(1):'0')+'%';$('#perfNet').textContent=fmtIDR(net);$('#perfPF').textContent=grossLoss?(grossWin/grossLoss).toFixed(2):'—';$('#perfBest').textContent=fmtIDR(n?Math.max(...tradeHistory.map(x=>x.pnl)):0);$('#perfWorst').textContent=fmtIDR(n?Math.min(...tradeHistory.map(x=>x.pnl)):0);$('#perfStreak').textContent=lossStreak;$('#perfLive').textContent=hasValidPaperPosition()?`Posisi ${paperPos.side} ${paperPos.symbol} · Entry ${fmtTradeP(paperPos.entry)} · Unrealized ${fmtIDR(unrealized)}`:'Posisi aktif: belum ada';if(n){const rows=tradeHistory.slice(-8).reverse().map(x=>`<div class="log"><b>${x.symbol} ${x.side}</b> · Entry ${fmtTradeP(x.entry??0)} → Exit ${fmtTradeP(x.exit??0)} · <b>${fmtIDR(x.pnl)}</b> · ${x.result} · ${x.reason||''} · ${new Date(x.time).toLocaleString('id-ID',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</div>`).join('');$('#perfHistory').innerHTML=rows}else $('#perfHistory').textContent='Belum ada trade yang ditutup.'}
+function paperMargin(){return Math.max(0,Number($('#margin').value)||DEFAULT_PAPER_MARGIN_IDR)}
+function paperLeverage(){return Math.max(1,Number($('#lev').value)||DEFAULT_LEVERAGE)}
+function paperNotional(){return paperMargin()*paperLeverage()}
+function renderPaperOrderPreview(){const m=paperMargin(),lev=paperLeverage(),notional=paperNotional();$('#marginOut').textContent=fmtIDR(m);$('#positionSizeOut').textContent=fmtIDR(notional);if(hasValidPaperPosition())return;let a=analyze();if(a){let risk=HARD_RISK_PCT/100,sp=Number($('#slPct').value)/100,rr=Number($('#rr').value),p=a.c.close,sl=a.bias==='SHORT'?p*(1+sp):p*(1-sp),tp=a.bias==='SHORT'?p*(1-sp*rr):p*(1+sp*rr);$('#slOut').textContent=fmtP(sl);$('#tpOut').textContent=fmtP(tp)}}
+function updatePaperAccount(unrealized=0){paperPnl=tradeHistory.reduce((a,t)=>a+Number(t.pnl||0),0);const balance=accountEquity+paperPnl,usedMargin=hasValidPaperPosition()?Number(paperPos.margin||0):0;$('#acctStatus').textContent='PAPER';$('#balance').textContent=fmtIDR(balance);$('#available').textContent=fmtIDR(Math.max(0,balance-usedMargin));$('#unrealized').textContent=fmtIDR(unrealized);$('#paperPnl').textContent=fmtIDR(paperPnl);renderPerformance(unrealized)}
+function aSafeBear(){const a=analyze();return !!(a&&a.bear&&a.bodyPct>=0.25);}
+function aSafeBull(){const a=analyze();return !!(a&&a.bull&&a.bodyPct>=0.25);}
+function hardLossTriggerPrice(limit){
+ if(!hasValidPaperPosition())return paperPos?.entry||0;
+ const p=paperPos,entry=Number(p.entry),qty=Math.max(0,Number(p.qty));
+ if(!qty)return entry;
+ const dir=p.side==='BUY'?1:-1;
+ let lo=dir===1?entry*0.90:entry, hi=dir===1?entry:entry*1.10;
+ // Find a price whose simulated net PnL is approximately -limit, including fee/slippage.
+ for(let i=0;i<45;i++){const mid=(lo+hi)/2, pnl=currentPaperPnl(mid);if(dir===1){if(pnl<-limit)lo=mid;else hi=mid}else{if(pnl<-limit)hi=mid;else lo=mid}}
+ return dir===1?hi:lo;
+}
+function updatePosition(price){
+ if(!paperPos)return;
+ let p=paperPos,dir=p.side==='BUY'?1:-1,raw=(price-p.entry)*p.qty*dir,fee=(Math.abs(p.entry*p.qty)+Math.abs(price*p.qty))*Number($('#fee').value)/100,slip=Math.abs(price*p.qty)*Number($('#slippage').value)/100,pnlIDR=(raw-fee-slip)*IDR;
+ let r=Math.abs(p.entry-p.initialSL)*p.qty;
+ if(pnlIDR>Number(p.peakPnl||0))p.peakPnl=pnlIDR;
+ if(!p.be&&raw>=r*1){p.sl=p.entry*(p.side==='BUY'?1.0002:.9998);p.be=true;log('SL PLUS → BREAK EVEN')}
+ if(p.trail&&raw>r*1.5){let t=atr()*0.8;p.sl=p.side==='BUY'?Math.max(p.sl,price-t):Math.min(p.sl,price+t)}
+ renderPosition(pnlIDR);updatePaperAccount(pnlIDR);renderTradeVisuals();
+ // Pair-level protection: 3 consecutive closed losses on the same pair locks that pair.
+ if(isPairLossBlocked(p.symbol)&&pnlIDR<=0){const locked=pnlIDR;log(`PAIR LOCK LIVE → ${p.symbol} · 3 LOSS BERUNTUN · posisi ditutup`);closePaper(price,locked,'PAIR 3 LOSS LOCK');return;}
+ // Profit protection is checked on EVERY live tick, not only on the 5s hunter scan.
+ // Example: peak +Rp100.000 with 10% giveback => close at +Rp90.000.
+ // ACTIVE LOSS EXIT: when a losing position meets a clearly opposite 15M candle, close immediately.
+ // This removes the old requirement to wait for a 60% score or several negative scans.
+ const oppositeNow=pnlIDR<0&&((p.side==='BUY'&&aSafeBear())||(p.side==='SELL'&&aSafeBull()));
+ if(oppositeNow){
+   const locked=pnlIDR;
+   log(`ACTIVE CANDLE LOSS EXIT → ${p.symbol} ${p.side} · ${fmtIDR(locked)} · tutup & cari pair lain`);
+   closePaper(price,locked,'ACTIVE CANDLE LOSS → ROTATE');
+   return;
+ }
+ // HARD FLOATING-LOSS GUARD: checked on EVERY live price/UI tick.
+ // Independent of Auto Rotate, scanner results, or signal validity.
+ // Equity Rp10.000.000 × 0.20% = Rp20.000 maximum floating loss.
+ const hardLossPct=HARD_RISK_PCT/100;
+ const currentEquity=Math.max(1,Number(accountEquity)+Number(paperPnl));
+ const hardLossLimit=hardLossPct*currentEquity;
+ if(pnlIDR<0 && Math.abs(pnlIDR)>=hardLossLimit){
+   const triggerPrice=hardLossTriggerPrice(hardLossLimit);
+   const locked=-hardLossLimit;
+   log(`HARD LOSS CUTOFF → ${p.symbol} ${p.side} · ${fmtIDR(locked)} · limit ${fmtIDR(-hardLossLimit)} · trigger ${fmtTradeP(triggerPrice)}`);
+   closePaper(triggerPrice,locked,'HARD FLOATING LOSS 0.20%');
+   return;
+ }
+ const givebackPct=Math.min(100,Math.max(1,Number($('#profitGiveback').value)||35))/100;
+ const peak=Number(p.peakPnl||0);
+ const givebackHit=$('#autoRotate')?.checked && peak>0 && pnlIDR>0 && pnlIDR<=peak*(1-givebackPct);
+ if(givebackHit){
+   const locked=pnlIDR;
+   log(`PROFIT LOCK LIVE → ${p.symbol} peak ${fmtIDR(peak)} → ${fmtIDR(locked)} · giveback ${((peak-locked)/peak*100).toFixed(1)}%`);
+   closePaper(price,locked,'PROFIT GIVEBACK');
+   // scan() will run again immediately on the next hunter cycle and may re-enter
+   // the same pair if it is still the strongest valid 15M opportunity.
+   return;
+ }
+ let hit=p.side==='BUY'?(price<=p.sl||price>=p.tp):(price>=p.sl||price<=p.tp);
+ if(hit)closePaper(price,pnlIDR,'SL/TP');
+}
+function closePaper(price=(analyze()?.c.close||paperPos?.entry),pnlOverride=null,reason='MANUAL'){if(!hasValidPaperPosition())return;let p=paperPos,pnl=Number.isFinite(Number(pnlOverride))?Number(pnlOverride):currentPaperPnl(price);dailyPnl+=pnl;paperPnl+=pnl;tradeHistory.push({time:Date.now(),symbol:p.symbol,side:p.side,entry:Number(p.entry),exit:Number(price),qty:Number(p.qty),margin:Number(p.margin||0),leverage:Number(p.leverage||0),pnl,result:pnl>=0?'WIN':'LOSS',reason});if(tradeHistory.length>500)tradeHistory=tradeHistory.slice(-500);$('#paperPnl').textContent=fmtIDR(paperPnl);$('#dailyLossOut').textContent=fmtIDR(dailyPnl);if(pnl<0){lossStreak++;tradeStats.losses++;pairLossStreak[p.symbol]=getPairLossStreak(p.symbol)+1;blockPairAfterLoss(p.symbol);rotateAwaySymbol=p.symbol;rotateAwayUntil=Date.now()+PAIR_LOSS_COOLDOWN_MS}else{lossStreak=0;tradeStats.wins++;pairLossStreak[p.symbol]=0;delete pairCooldownUntil[p.symbol];}$('#lossStreak').textContent=lossStreak;updatePairLossUI(p.symbol);const pairLosses=getPairLossStreak(p.symbol);log(`PAPER EXIT ${p.symbol} · ${p.side} · EXIT ${fmtTradeP(price)} · ${fmtIDR(pnl)} · ${reason}`);if(pnl<0){log(`LOSS 1X → ${p.symbol} langsung di-COLDOWN 30 menit. Tutup posisi dan cari pair lain sekarang.`);} tradeMarkers.push({symbol:p.symbol,time:Math.floor(Number(analyze()?.c?.time||Date.now()/1000)),position:p.side==='BUY'?'aboveBar':'belowBar',color:pnl>=0?'#19d59a':'#ff5c72',shape:'circle',text:`EXIT ${fmtTradeP(price)}`}); if(tradeMarkers.length>50)tradeMarkers=tradeMarkers.slice(-50); paperPos=null; clearPositionVisuals(); renderTradeVisuals(); persist(); renderPosition(); updatePaperAccount(0); let a=analyze(); syncPaperStateUI(a); if(pnl<0&&mode==='paper'&&!killed){setTimeout(()=>{if(!hasValidPaperPosition())scan().catch(()=>{});},60)}}
+async function submitOrder(side){if(killed){alert('Kill switch aktif. Matikan KILL SWITCH untuk mengizinkan entry.');return}if(mode==='paper'){openPaper(side);return}let g=guard();if(g.length){alert('ENTRY DIBLOKIR: '+g.join(', '));return}let a=analyze(),sp=Number($('#slPct').value)/100,rr=Number($('#rr').value),p=a.c.close,sl=side==='BUY'?p*(1-sp):p*(1+sp),tp=side==='BUY'?p*(1+sp*rr):p*(1-sp*rr),q=Number($('#qty').value);if(!confirm(`${mode.toUpperCase()} ${side} ${symbol}\nEntry ~ ${fmtP(p)}\nSL ${fmtP(sl)}\nTP ${fmtP(tp)}\nKirim order?`))return;try{let endpoint=mode==='testnet'?'/api/bracket-order':'/api/bracket-order';let r=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol,side,quantity:q,stopPrice:sl,takeProfitPrice:tp})});let d=await r.json();if(!r.ok)throw Error(d.error||'Order gagal');log(`${mode.toUpperCase()} ${side} ${symbol} entry ${d.entry?.orderId||'ok'} + bracket SL/TP`);await account()}catch(e){log('ORDER ERROR: '+e.message);alert(e.message)}}
+async function closePosition(){if(mode==='paper'){closePaper();return}let d=await (await fetch('/api/account',{cache:'no-store'})).json();let p=(d.positions||[]).find(x=>x.symbol===symbol&&Number(x.size)>0);if(!p){alert('Tidak ada posisi Bybit untuk pair ini.');return}if(!confirm('Tutup posisi '+symbol+' sekarang?'))return;let side=String(p.side).toLowerCase()==='buy'?'SELL':'BUY';try{let r=await fetch('/api/close',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol,side,quantity:Math.abs(Number(p.size))})});let x=await r.json();if(!r.ok)throw Error(x.error||'Close gagal');log(`BYBIT ${mode.toUpperCase()} position close sent`);await account();if(mode==='demo')await fetchDemoHistory()}catch(e){alert(e.message)}}
+async function account(){if(mode==='paper'){updatePaperAccount(hasValidPaperPosition()?currentPaperPnl(livePrice||analyze()?.c?.close||paperPos?.entry):0);renderPerformance(hasValidPaperPosition()?currentPaperPnl(livePrice||analyze()?.c?.close||paperPos?.entry):0);return}try{let d=await(await fetch('/api/account',{cache:'no-store'})).json();if(!d.connected){$('#acctStatus').textContent='NOT CONFIGURED';$('#liveWarning').textContent='API Bybit belum terhubung.';return}demoPositions=Array.isArray(d.positions)?d.positions:[];accountEquity=+d.account.walletBalance*IDR;const available=+d.account.availableBalance*IDR;const unreal=+d.account.unrealizedProfit*IDR;$('#acctStatus').textContent=mode==='demo'?'BYBIT DEMO CONNECTED':'CONNECTED';$('#balance').textContent=fmtIDR(accountEquity);$('#available').textContent=fmtIDR(available);$('#unrealized').textContent=fmtIDR(unreal);const p=currentDemoPosition();if(mode==='demo'){if(p){const side=demoPositionSide(p);$('#position').innerHTML=`<div class="grid3"><div class="metric"><span class="muted">Side</span><b class="${side==='BUY'?'up':'down'}">${side} ${p.symbol}</b></div><div class="metric"><span class="muted">Entry</span><b>${fmtTradeP(Number(p.avgPrice))}</b></div><div class="metric"><span class="muted">Qty</span><b>${demoPositionQty(p).toFixed(6)}</b></div></div><div class="grid3" style="margin-top:7px"><div class="metric"><span class="muted">Leverage</span><b>${p.leverage||'-'}x</b></div><div class="metric"><span class="muted">PnL</span><b class="${demoPnlForPosition(p)>=0?'up':'down'}">${fmtIDR(demoPnlForPosition(p))}</b></div><div class="metric"><span class="muted">SL / TP</span><b>${p.stopLoss?fmtTradeP(p.stopLoss):'—'} / ${p.takeProfit?fmtTradeP(p.takeProfit):'—'}</b></div></div>`;chart&&chart.setPosition({symbol:p.symbol,side,entry:Number(p.avgPrice),qty:demoPositionQty(p),sl:Number(p.stopLoss||0),tp:Number(p.takeProfit||0)});}else{$('#position').innerHTML='<div class="muted">BYBIT DEMO · Tidak ada posisi.</div>';chart&&chart.setPosition(null)}renderDemoPerformance();}else{renderPosition(unreal)} }catch(e){log('Account error: '+e.message);$('#acctStatus').textContent='SYNC ERROR'}}
+function setMode(){mode=$('#orderMode').value;$('#mode').textContent=mode==='demo'?'BYBIT DEMO · 15M':mode.toUpperCase()+' · 15M';$('#liveWarning').className=mode==='live'?'dangerbox':mode==='demo'?'warning':mode==='testnet'?'warning':'goodbox';$('#liveWarning').textContent=mode==='live'?'LIVE AKTIF hanya jika server ALLOW_LIVE_TRADING=true.':mode==='demo'?'BYBIT DEMO: saldo, posisi, order, PnL & history dibaca dari akun Demo. KILL SWITCH OFF = auto boleh jalan; ON = semua entry otomatis diblokir.':'PAPER: tidak ada order sungguhan.';account();if(mode==='demo')fetchDemoHistory()}
+function isPairBlocked(sym){return Number(pairCooldownUntil[sym]||0)>Date.now() || (sym===rotateAwaySymbol && Date.now()<rotateAwayUntil);}
+async function manualNextPair(){
+ if(hasValidPaperPosition() || (mode!=='paper' && demoPositions.some(x=>Number(x.size)>0))){alert('Tutup posisi aktif terlebih dahulu sebelum ganti pair manual.');return}
+ const current=symbol; rotateAwaySymbol=current; rotateAwayUntil=Date.now()+15*60*1000; lastSwitchAt=Date.now();
+ const items=$$('#symbols .sym').map(el=>({el,sym:el.dataset.s||el.querySelector('b')?.textContent?.trim()||''})).filter(x=>x.sym&&x.sym!==current&&!isPairBlocked(x.sym));
+ let target=items[0]?.sym;
+ if(!target){await scan();const fresh=$$('#symbols .sym').map(el=>el.dataset.symbol||'').filter(x=>x&&x!==current&&!isPairBlocked(x));target=fresh[0]}
+ if(!target){alert('Belum ada pair lain yang tersedia.');return}
+ log(`MANUAL PAIR SWITCH · ${current} → ${target}`);await switchSymbol(target);
+}
+function runBacktest(){let n=Math.min(Number($('#btLimit').value),candles.length-25),risk=Number($('#btRisk').value),rr=Number($('#btRR').value),start=candles.length-n,equity=0,peak=0,maxDD=0,wins=0,losses=0,net=0,worst=0,streak=0,best=-Infinity;for(let i=start+20;i<candles.length-1;i++){let sub=candles.slice(0,i+1),old=candles; candles=sub;let a=analyze();candles=old;if(!a)continue;let signal=$('#btStrategy').value==='reversal'?(a.wick===1?'LONG':a.wick===-1?'SHORT':null):a.bias==='LONG'?'LONG':a.bias==='SHORT'?'SHORT':null;if(!signal||!a.allowed)continue;let entry=candles[i].close,slPct=Number($('#slPct').value)/100,sl=signal==='LONG'?entry*(1-slPct):entry*(1+slPct),tp=signal==='LONG'?entry*(1+slPct*rr):entry*(1-slPct*rr),out=null;for(let j=i+1;j<candles.length;j++){let c=candles[j];if(signal==='LONG'){if(c.low<=sl){out=-1;break}if(c.high>=tp){out=rr;break}}else{if(c.high>=sl){out=-1;break}if(c.low<=tp){out=rr;break}}}if(out===null)continue;net+=out;equity+=out*risk;best=Math.max(best,out);if(out>0){wins++;streak=0}else{losses++;streak++;worst=Math.max(worst,streak)}peak=Math.max(peak,equity);maxDD=Math.max(maxDD,peak-equity)}let trades=wins+losses,pf=losses?wins*rr/losses:Infinity;$('#btTrades').textContent=trades;$('#btWin').textContent=trades?(wins/trades*100).toFixed(1)+'%':'—';$('#btPF').textContent=Number.isFinite(pf)?pf.toFixed(2):'∞';$('#btDD').textContent=maxDD.toFixed(2)+'%';$('#btNet').textContent=net.toFixed(2)+'R';$('#btStreak').textContent=worst;$('#btBest').textContent=best===-Infinity?'—':best.toFixed(2)+'R';$('#btSummary').textContent=trades?`Hasil simulasi 15M: ${trades} trade, ${wins} win, ${losses} loss. Consecutive loss terburuk ${worst}. Gunakan hasil ini untuk mengukur robustness, bukan jaminan hasil masa depan.`:'Tidak ada setup valid pada periode tersebut.';log('Backtest selesai: '+trades+' trades')}
+$$('[data-tool]').forEach(b=>b.onclick=()=>{$$('[data-tool]').forEach(x=>x.classList.remove('active'));b.classList.add('active');tool=b.dataset.tool});$('#srBtn').onclick=()=>{srActive=!srActive;$('#srBtn').classList.toggle('active',srActive);if(srActive)drawSR();else{drawings.forEach(x=>x.remove?.());drawings=[]}};$('#clearDraw').onclick=()=>{drawings.forEach(x=>x.remove?.());drawings=[]};$('#buyBtn').onclick=()=>submitOrder('BUY');$('#sellBtn').onclick=()=>submitOrder('SELL');$('#closeBtn').onclick=closePosition;$('#beBtn').onclick=()=>{if(paperPos){paperPos.sl=paperPos.entry*(paperPos.side==='BUY'?1.0002:.9998);paperPos.be=true;renderPosition();log('Manual SL Plus / BE')}};$('#partialBtn').onclick=()=>{if(paperPos&&!paperPos.partial){paperPos.qty*=.5;paperPos.partial=true;log('Partial TP: 50% size dikunci')}};$('#trailBtn').onclick=()=>{if(paperPos){paperPos.trail=!paperPos.trail;log('Trailing '+(paperPos.trail?'ON':'OFF'))}};$('#orderMode').onchange=setMode;['margin','lev','risk','slPct','rr','maxFloatLoss','profitGiveback','negativeScans'].forEach(id=>{const el=$('#'+id);if(el){el.addEventListener('input',()=>{renderPaperOrderPreview();persist();});el.addEventListener('change',()=>{renderPaperOrderPreview();persist();});}});$('#accountBtn').onclick=account;$('#refreshScan').onclick=scan;$('#autoToggle').onclick=()=>{auto=!auto;$('#autoToggle').textContent=auto?'AUTO ON':'AUTO OFF'};$('#killBtn').onclick=()=>{killed=!killed;$('#killBtn').textContent='KILL SWITCH: '+(killed?'ON':'OFF');$('#killBtn').classList.toggle('active',killed);log(killed?'KILL SWITCH ON — semua auto/manual entry baru diblokir':'KILL SWITCH OFF — auto entry diizinkan kembali');if(!killed&&mode==='demo')account();};$('#runBacktest').onclick=runBacktest;$('#downloadHistory').onclick=downloadTradeHistory;$('#downloadJpg').onclick=downloadTradeJpg;$('#nextPairBtn')?.addEventListener('click',manualNextPair);
+
+// V25 BYBIT-STYLE UI: orderbook, leverage, quantity controls, TP/SL, position/order tabs.
+let btOrderBookTimer=null, btOrderBookBusy=false;
+async function loadBtOrderBook(){
+ if(btOrderBookBusy)return; btOrderBookBusy=true;
+ try{
+  const d=await bybitPublic('/v5/market/orderbook',{category:'linear',symbol:symbol,limit:'10'});
+  const asks=(d?.result?.a||[]).slice(0,5).map(x=>({p:Number(x[0]),q:Number(x[1])}));
+  const bids=(d?.result?.b||[]).slice(0,5).map(x=>({p:Number(x[0]),q:Number(x[1])}));
+  const fmt=x=>Number(x).toLocaleString('en-US',{maximumFractionDigits:priceDecimals(x)});
+  const rows=(arr,cls)=>arr.map(x=>`<div class="bt-row ${cls}"><span>${fmt(x.p)}</span><span>${x.q.toFixed(6)}</span><span>${(x.p*x.q).toFixed(3)}</span></div>`).join('');
+  $('#btAsks').innerHTML=rows(asks,'bt-ask')||'<div class="bt-note">—</div>';
+  $('#btBids').innerHTML=rows(bids,'bt-bid')||'<div class="bt-note">—</div>';
+  const mid=asks[0]&&bids[0]?(asks[0].p+bids[0].p)/2:(candles.at(-1)?.close||0);$('#btMid').textContent=mid?fmt(mid):'—';
+  $('#btMarketStatus').textContent='ORDER BOOK · '+new Date().toLocaleTimeString('id-ID',{hour12:false});
+ }catch(e){$('#btMarketStatus').textContent='ORDER BOOK ERROR'} finally{btOrderBookBusy=false}
+}
+function updateBtHeader(){
+ const a=analyze(), p=a?.c?.close||candles.at(-1)?.close||0;
+ $('#btSymbol').textContent=symbol; $('#btPrice').textContent=p?fmtTradeP(p):'—';
+ const pc=Number(candles.at(-1)?.close||0),po=Number(candles.at(-1)?.open||0),chg=po?((pc-po)/po*100):0;
+ $('#btChange').textContent=(chg>=0?'+':'')+chg.toFixed(2)+'%';$('#btChange').className='bt-sub '+(chg>=0?'up':'down');const last24=candles.slice(-96);if(last24.length){$('#btLastPrice').textContent=fmtTradeP(p);$('#btHigh24').textContent=fmtTradeP(Math.max(...last24.map(x=>+x.high)));$('#btLow24').textContent=fmtTradeP(Math.min(...last24.map(x=>+x.low)));}
+ $('#btAvailable').textContent=$('#available')?.textContent||'—';
+ if(a&&p){const slPct=Number($('#btSLPct').value||0.8)/100,rr=Number($('#btRR').value||2),sl=a.bias==='SHORT'?p*(1+slPct):p*(1-slPct),tp=a.bias==='SHORT'?p*(1-slPct*rr):p*(1+slPct*rr);$('#btLimitPrice').value=Number(p.toFixed(priceDecimals(p)));$('#btLimitPrice').dataset.sl=sl;$('#btLimitPrice').dataset.tp=tp;}
+ renderBtPosition();renderBtOrderPreview();
+}
+function renderBtOrderPreview(){const p=Number($('#btPrice').textContent.replace(/,/g,''))||Number(candles.at(-1)?.close||0),q=Math.max(0,Number($('#btQty').value)||0),lev=Math.max(1,Number($('#btLevSelect').value)||10),value=p*q*IDR,fee=value*(Number($('#fee')?.value||0.04)/100);$('#btValue').textContent=fmtIDR(value);$('#btFee').textContent=fmtIDR(fee);$('#btQtySlider').value=Math.min(100,Math.max(0,Number($('#btQtySlider').value)||0));}
+function renderBtPosition(){if(!$('#btPosCount'))return;const p=paperPos;if(p&&hasValidPaperPosition()){const pnl=currentPaperPnl(candles.at(-1)?.close||p.entry);$('#btPosCount').textContent='1';$('#btPosSide').textContent=p.side+' '+p.symbol;$('#btPosSide').className=p.side==='BUY'?'up':'down';$('#btPosEntry').textContent=fmtTradeP(p.entry);$('#btPosPnl').textContent=fmtIDR(pnl);$('#btPosPnl').className=pnl>=0?'up':'down';}else{$('#btPosCount').textContent='0';$('#btPosSide').textContent='—';$('#btPosEntry').textContent='—';$('#btPosPnl').textContent='Rp 0';}}
+async function btSubmit(side){
+ const type=$('#btOrderType').value, reduce=$('#btReduceOnly').checked;
+ if(reduce&&!hasValidPaperPosition()){alert('Hanya Kurangi: belum ada posisi aktif.');return;}
+ if(type==='limit'&&mode==='paper'){alert('Limit order Paper akan menjadi pending-order engine pada revisi berikutnya. Gunakan Market untuk entry Paper saat ini.');return;}
+ if(reduce&&mode==='paper'){closePaper();return;}
+ if($('#btTPSL').checked){$('#slPct').value=$('#btSLPct').value;$('#rr').value=$('#btRR').value;}
+ $('#lev').value=String(Number($('#btLevSelect').value)||10);$('#qty').value=$('#btQty').value;
+ renderPaperOrderPreview();submitOrder(side);
+}
+let activeSubIndicator='mavol', btGridOn=true;
+function smaArr(vals,n){const out=[];let sum=0;for(let i=0;i<vals.length;i++){sum+=Number(vals[i]||0);if(i>=n)sum-=Number(vals[i-n]||0);out.push(i+1>=n?sum/n:null)}return out}
+function emaArr(vals,n){const out=[];const k=2/(n+1);let prev=null;for(let i=0;i<vals.length;i++){const v=Number(vals[i]||0);prev=prev==null?v:v*k+prev*(1-k);out.push(prev)}return out}
+function rsiArr(vals,n=14){const out=Array(vals.length).fill(null);let g=0,l=0;for(let i=1;i<vals.length;i++){const d=vals[i]-vals[i-1],up=Math.max(0,d),dn=Math.max(0,-d);if(i<=n){g+=up;l+=dn;if(i===n){const rs=l?g/l:99;out[i]=100-100/(1+rs)}}else{g=(g*(n-1)+up)/n;l=(l*(n-1)+dn)/n;const rs=l?g/l:99;out[i]=100-100/(1+rs)}}return out}
+function renderIndicatorPanel(){const cv=$('#indicatorCanvas');if(!cv||!candles.length)return;const rect=cv.getBoundingClientRect(),d=devicePixelRatio||1,W=Math.max(1,rect.width),H=Math.max(120,rect.height);cv.width=Math.floor(W*d);cv.height=Math.floor(H*d);const c=cv.getContext('2d');c.setTransform(d,0,0,d,0,0);c.clearRect(0,0,W,H);c.fillStyle='#070d14';c.fillRect(0,0,W,H);const data=candles.slice(-90),cl=data.map(x=>+x.close),vol=data.map(x=>+x.volume||0);const x=i=>10+i*Math.max(1,(W-20)/Math.max(1,data.length-1));let vals=[];let label='';if(activeSubIndicator==='mavol'){vals=smaArr(vol,5);label='VOLUME · MA5';}else if(activeSubIndicator==='macd'){const e12=emaArr(cl,12),e26=emaArr(cl,26);const mac=e12.map((v,i)=>v-(e26[i]||v)),sig=emaArr(mac,9);vals=mac;label='MACD 12/26 · SIGNAL 9';drawLine(sig,'#4de1ff');}else if(activeSubIndicator==='kdj'){vals=cl.map((v,i)=>{const a=data.slice(Math.max(0,i-8),i+1),lo=Math.min(...a.map(z=>+z.low)),hi=Math.max(...a.map(z=>+z.high));return hi===lo?50:(v-lo)/(hi-lo)*100});label='KDJ · 9';}else if(activeSubIndicator==='rsi'){vals=rsiArr(cl,14);label='RSI 14';drawRef(70);drawRef(30);}else if(activeSubIndicator==='wr'){vals=cl.map((v,i)=>{const a=data.slice(Math.max(0,i-13),i+1),lo=Math.min(...a.map(z=>+z.low)),hi=Math.max(...a.map(z=>+z.high));return hi===lo?-50:(hi-v)/(hi-lo)*-100});label='WILLIAMS %R';}else{const r=rsiArr(cl,14);vals=r.map((v,i)=>v==null?null:100*(v-Math.min(...r.slice(Math.max(0,i-13),i+1).filter(Number.isFinite)))/(Math.max(...r.slice(Math.max(0,i-13),i+1).filter(Number.isFinite))-Math.min(...r.slice(Math.max(0,i-13),i+1).filter(Number.isFinite))||1));label='STOCH RSI';drawRef(80);drawRef(20);}const finite=vals.filter(Number.isFinite),lo=Math.min(...finite,0),hi=Math.max(...finite,1);const y=v=>H-18-(v-lo)/(hi-lo||1)*(H-38);c.strokeStyle='#17283a';c.lineWidth=1;for(let i=0;i<4;i++){const yy=10+i*(H-28)/3;c.beginPath();c.moveTo(0,yy);c.lineTo(W,yy);c.stroke()}c.strokeStyle='#19d59a';c.lineWidth=1.5;c.beginPath();let started=false;vals.forEach((v,i)=>{if(!Number.isFinite(v))return;const xx=x(i),yy=y(v);if(!started){c.moveTo(xx,yy);started=true}else c.lineTo(xx,yy)});c.stroke();c.fillStyle='#7f90a6';c.font='10px system-ui';c.fillText(label,10,14);const last=vals.at(-1);if(Number.isFinite(last)){c.fillStyle='#e9f0f8';c.fillText(String(last.toFixed(2)),W-10,14);}
+function drawRef(v){if(!Number.isFinite(v))return;const yy=y(v);c.strokeStyle='#4d6075';c.setLineDash([4,4]);c.beginPath();c.moveTo(0,yy);c.lineTo(W,yy);c.stroke();c.setLineDash([])}
+function drawLine(arr,col){const f=arr.map(Number).filter(Number.isFinite);if(!f.length)return;const mn=Math.min(lo,...f),mx=Math.max(hi,...f);const yy=v=>H-18-(v-mn)/(mx-mn||1)*(H-38);c.strokeStyle=col;c.lineWidth=1;c.beginPath();let st=false;arr.forEach((v,i)=>{if(!Number.isFinite(v))return;const xx=x(i),y2=yy(v);if(!st){c.moveTo(xx,y2);st=true}else c.lineTo(xx,y2)});c.stroke()}}
+function setVisualTf(v){const raw=String(v||'15m').trim();const map={'1m':'1M','3m':'3M','5m':'5M','15m':'15M','30m':'30M','1h':'1J','2h':'2J','4h':'4J','6h':'6J','12h':'12J','1d':'1H','1w':'1B','1M':'1M'};const label=map[raw]||raw.toUpperCase();$('#visualTfPill').textContent='VIEW '+label;$('#btSymbol').closest('.bt-symbol')?.querySelector('.bt-sub')?.replaceChildren(document.createTextNode('Bybit Linear · Engine 15M · View '+label));log('Visual interval → '+label+' · Paper Engine tetap 15M');}
+function initV26IndicatorUI(){
+ $$('[data-subind]').forEach(b=>b.onclick=()=>{$$('[data-subind]').forEach(x=>x.classList.remove('active'));b.classList.add('active');activeSubIndicator=b.dataset.subind;renderIndicatorPanel();});
+ $$('[data-tf]').forEach(b=>b.onclick=()=>{if(b.dataset.tf!=='15m'){alert('Engine Paper tetap 15M. Interval lain adalah tampilan referensi seperti Bybit dan tidak mengubah strategi.');}$$('[data-tf]').forEach(x=>x.classList.remove('active'));b.classList.add('active');setVisualTf(b.dataset.tf);});
+ const moreBtn=$('#moreTfBtn'), moreMenu=$('#moreTfMenu');
+ moreBtn?.addEventListener('click',e=>{e.stopPropagation();moreMenu?.classList.toggle('open');});
+ document.addEventListener('click',e=>{if(moreMenu&&!moreMenu.contains(e.target)&&e.target!==moreBtn)moreMenu.classList.remove('open');});
+ $$('[data-moretf]').forEach(b=>b.onclick=()=>{setVisualTf(b.dataset.moretf);$$('[data-moretf]').forEach(x=>x.classList.remove('active'));b.classList.add('active');moreMenu?.classList.remove('open');});
+ $('#customTfBtn')?.addEventListener('click',()=>{const v=prompt('Masukkan interval Bybit (contoh: 1, 3, 5, 15, 30, 60, 120, 360, 720, D, W, M):','15');if(!v)return;setVisualTf(v);moreMenu?.classList.remove('open');});
+ $('#gridToolBtn')?.addEventListener('click',()=>{btGridOn=!btGridOn;$('#gridToolBtn').classList.toggle('active',btGridOn);log('Chart grid '+(btGridOn?'ON':'OFF'));});
+ $('#settingsToolBtn')?.addEventListener('click',()=>alert('Chart settings: 15M engine, Bybit Linear, candle realtime, indikator aktif di panel bawah.'));
+ $('#drawToolBtn')?.addEventListener('click',()=>{$('[data-tool="trend"]')?.click();});
+ $$('[data-mtab]').forEach(b=>b.onclick=()=>{ $$('[data-mtab]').forEach(x=>x.classList.remove('active'));b.classList.add('active');const pane=$('#btMarketPane');if(b.dataset.mtab==='book'){pane.innerHTML='<div class="bt-note">Order book realtime tampil di panel ASK/BID di atas.</div>';}else if(b.dataset.mtab==='trades'){pane.innerHTML='<div id="btTradeFeed" class="bt-tradefeed"><div class="bt-note">Memuat transaksi Bybit…</div></div>';loadBtRecentTrades();}else{pane.innerHTML='<div class="bt-contract-grid"><div class="bt-contract-item"><span>Kontrak</span><b id="ctSymbol">'+symbol+'</b></div><div class="bt-contract-item"><span>Kategori</span><b>Linear USDT</b></div><div class="bt-contract-item"><span>Leverage</span><b id="ctLev">'+($('#lev')?.value||10)+'x</b></div><div class="bt-contract-item"><span>Funding</span><b id="ctFunding">—</b></div><div class="bt-contract-item"><span>Tick Size</span><b id="ctTick">—</b></div><div class="bt-contract-item"><span>Min Qty</span><b id="ctMinQty">—</b></div></div>';loadBtContractInfo();}});
+ renderIndicatorPanel();
+}
+async function loadBtRecentTrades(){try{const d=await bybitPublic('/v5/market/recent-trade',{category:'linear',symbol:symbol,limit:'20'}),rows=d?.result?.list||[];const el=$('#btTradeFeed');if(!el)return;el.innerHTML=rows.slice(0,12).map(x=>{const up=String(x.S||'Buy').toLowerCase()==='buy';return '<div class="bt-trade-row"><span>'+fmtTradeP(Number(x.p))+'</span><span class="'+(up?'up':'down')+'">'+(up?'BUY':'SELL')+'</span><span>'+Number(x.v||0).toFixed(4)+'</span></div>'}).join('')||'<div class="bt-note">Tidak ada transaksi.</div>';}catch(e){const el=$('#btTradeFeed');if(el)el.innerHTML='<div class="bt-note">Feed transaksi tidak tersedia.</div>';}}
+async function loadBtContractInfo(){try{const d=await bybitPublic('/v5/market/instruments-info',{category:'linear',symbol:symbol}),x=d?.result?.list?.[0];if(!x)return;$('#ctTick').textContent=x.priceFilter?.tickSize||'—';$('#ctMinQty').textContent=x.lotSizeFilter?.minOrderQty||'—';}catch{}}
+function initV25BybitUI(){
+ $('#btLong').onclick=()=>btSubmit('BUY');$('#btShort').onclick=()=>btSubmit('SELL');
+ $('#btOrderType').onchange=()=>{$('#btLimitWrap').style.display=$('#btOrderType').value==='limit'?'grid':'none'};
+ $('#btLevSelect').onchange=()=>{$('#lev').value=parseInt($('#btLevSelect').value)||10;renderPaperOrderPreview();persist()};
+ $('#btQty').oninput=()=>{const q=Number($('#btQty').value)||0;$('#qty').value=q;renderBtOrderPreview()};
+ $('#btQtySlider').oninput=()=>{const pct=Number($('#btQtySlider').value)||0;const bal=Math.max(0,Number(accountEquity+paperPnl));const lev=Math.max(1,Number($('#btLevSelect').value)||10);const price=Number(candles.at(-1)?.close||0);const maxQty=price?bal*lev/(price*IDR):0;$('#btQty').value=(maxQty*pct/100).toFixed(6);$('#qty').value=$('#btQty').value;renderBtOrderPreview()};
+ $$('[data-qpct]').forEach(b=>b.onclick=()=>{$('#btQtySlider').value=b.dataset.qpct;$('#btQtySlider').dispatchEvent(new Event('input'))});
+ $$('[data-btab]').forEach(b=>b.onclick=()=>{$$('[data-btab]').forEach(x=>x.classList.remove('active'));b.classList.add('active');if(b.dataset.btab==='pos')$('#btBottom').innerHTML='<div class="bt-posgrid"><div class="metric"><span class="muted">Side</span><b id="btPosSide">—</b></div><div class="metric"><span class="muted">Entry</span><b id="btPosEntry">—</b></div><div class="metric"><span class="muted">PnL</span><b id="btPosPnl">Rp 0</b></div></div>';else if(b.dataset.btab==='ord')$('#btBottom').innerHTML='<div class="bt-note">Order aktif Paper/Bybit akan ditampilkan di sini. Mode PAPER tidak membuat order exchange.</div>';else $('#btBottom').innerHTML='<div class="bt-note">Aset mengikuti Account · IDR / Bybit Demo saat mode Demo aktif.</div>'});
+ $$('[data-ind]').forEach(b=>b.onclick=()=>{b.classList.toggle('active');log('Indikator '+b.dataset.ind.toUpperCase()+' '+(b.classList.contains('active')?'ON':'OFF'));});
+ updateBtHeader();loadBtOrderBook();clearInterval(btOrderBookTimer);btOrderBookTimer=setInterval(()=>{loadBtOrderBook();updateBtHeader()},2000);
+}
+
+(async()=>{killed=false;auto=false;$('#autoToggle').textContent='AUTO OFF';$('#autoToggle').classList.remove('active');$('#killBtn').textContent='KILL SWITCH: OFF';$('#killBtn').classList.remove('active');initChart();restore();updatePairLossUI(symbol);renderPaperOrderPreview();$('#symbolTitle').textContent=symbol;symbolGeneration++;const bootGen=symbolGeneration;try{await diagnoseMarketAccess();await syncMarketClock();setInterval(syncMarketClock,30000);const historyOK=await loadCandles(symbol,bootGen);if(bootGen===symbolGeneration){if(historyOK)await reconcileRealtime();connectWS(symbol,bootGen);}renderPosition();initV25BybitUI();initV26IndicatorUI();if(historyOK)await scan();else { $('#scanState').textContent='BYBIT MARKET BLOCKED'; $('#conn').textContent=`MARKET UNAVAILABLE · ${marketDiagnostic.direct} · ${marketDiagnostic.proxy}`; }log('System ready · BYBIT LINEAR · 15M · WebSocket-first · REST history/reconciliation')}catch(e){log('Init error: '+e.message);try{connectWS(symbol,bootGen)}catch{}}setInterval(updateUI,1000);setInterval(reconcileRealtime,1500);setInterval(()=>{if(mode==='demo')account().catch(()=>{});},2000);setInterval(()=>{if(mode==='demo')fetchDemoHistory().catch(()=>{});},7000);setInterval(scan,HUNTER.scanMs)})();
+
