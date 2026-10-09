@@ -108,7 +108,7 @@ const PAIR_LOSS_COOLDOWN_MS=30*60*1000;
 const HARD_RISK_PCT=0.20;
 const LONG_PREFERENCE_GAP=6;
 const scannerKlineCache=new Map();
-async function getScannerKlines(sym){const cacheKey=String(chartInterval)+':'+sym;const hit=scannerKlineCache.get(cacheKey);if(hit&&Date.now()-hit.at<5000)return hit.data;const d=await bybitPublic('/v5/market/kline',{category:'linear',symbol:sym,interval:tfApi(),limit:'80'});const data=d?.result?.list||[];if(!data.length)throw new Error('Bybit kline kosong');scannerKlineCache.set(cacheKey,{at:Date.now(),data});return data;}
+async function getScannerKlines(sym){const cacheKey=String(chartInterval)+':'+sym;const hit=scannerKlineCache.get(cacheKey);if(hit&&Date.now()-hit.at<5000)return hit.data;const d=await bybitPublic('/v5/market/kline',{category:'linear',symbol:sym,interval:'5',limit:'80'});const data=d?.result?.list||[];if(!data.length)throw new Error('Bybit kline kosong');scannerKlineCache.set(cacheKey,{at:Date.now(),data});return data;}
 const IDR=16000; const fmtP=n=>Number(n||0).toLocaleString('en-US',{maximumFractionDigits:priceDecimals(n)}); const fmtIDR=n=>'Rp '+Math.round(n||0).toLocaleString('id-ID');
 function priceDecimals(n){n=Math.abs(Number(n)||0);if(n>=1000)return 2;if(n>=100)return 3;if(n>=1)return 4;if(n>=0.1)return 5;if(n>=0.01)return 6;if(n>=0.001)return 7;return 8}
 function fmtTradeP(n){const d=priceDecimals(n);return Number(n||0).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d})}
@@ -205,14 +205,14 @@ function timeSignalData(){
  const nearSupport=(a.support<c.close)&&((c.close-a.support)/atrVal<0.65);
  // More selective setup: two same-direction closes, aligned EMA slope, meaningful momentum,
  // adequate relative volume, no stretched entry, and no immediate nearby S/R obstacle.
- const buyOK=bull&&prevBull&&above&&emaUp&&mom>=0.12&&prevMom>0&&bodyPct>=0.35&&cleanBull&&volumeRatio>=0.75&&notExtended&&!nearResistance&&a.regime!=='EXTREME VOLATILITY';
- const sellOK=bear&&prevBear&&below&&emaDown&&mom<=-0.12&&prevMom<0&&bodyPct>=0.35&&cleanBear&&volumeRatio>=0.75&&notExtended&&!nearSupport&&a.regime!=='EXTREME VOLATILITY';
+ const buyOK=bull&&prevBull&&above&&emaUp&&mom>=0.08&&prevMom>-0.05&&bodyPct>=0.28&&volumeRatio>=0.55&&notExtended&&!nearResistance&&a.regime!=='EXTREME VOLATILITY';
+ const sellOK=bear&&prevBear&&below&&emaDown&&mom<=-0.08&&prevMom<0.05&&bodyPct>=0.28&&volumeRatio>=0.55&&notExtended&&!nearSupport&&a.regime!=='EXTREME VOLATILITY';
  const buyScore=Math.min(100,(bull?12:0)+(prevBull?12:0)+(above?18:0)+(emaUp?18:0)+(mom>0?Math.min(18,Math.abs(mom)*9):0)+(volumeRatio>=0.75?8:0)+(notExtended?7:0)+(cleanBull?7:0));
  const sellScore=Math.min(100,(bear?12:0)+(prevBear?12:0)+(below?18:0)+(emaDown?18:0)+(mom<0?Math.min(18,Math.abs(mom)*9):0)+(volumeRatio>=0.75?8:0)+(notExtended?7:0)+(cleanBear?7:0));
  let side='HOLD',score=Math.max(buyScore,sellScore),reason='';
- if(buyOK&&buyScore>=72){side='BUY';score=buyScore;reason='2 candle bullish + harga di atas EMA20 + EMA naik + momentum dan volume terkonfirmasi';}
- else if(sellOK&&sellScore>=72){side='SELL';score=sellScore;reason='2 candle bearish + harga di bawah EMA20 + EMA turun + momentum dan volume terkonfirmasi';}
- else {const why=[];if(!notExtended)why.push('harga terlalu jauh dari EMA20');if(nearResistance)why.push('dekat resistance');if(nearSupport)why.push('dekat support');if(volumeRatio<0.75)why.push('volume lemah');if(!prevBull&&!prevBear)why.push('candle sebelumnya doji');if(bull&&!prevBull||bear&&!prevBear)why.push('belum ada konfirmasi 2 candle');if(!emaUp&&!emaDown)why.push('kemiringan EMA20 lemah');if(Math.abs(mom)<0.12)why.push('momentum belum cukup');if(!why.length)why.push('syarat konfirmasi lengkap belum terpenuhi');reason=why.join(' · ');}
+ if(buyOK&&buyScore>=64){side='BUY';score=buyScore;reason='2 candle bullish + harga di atas EMA20 + EMA naik + momentum dan volume terkonfirmasi';}
+ else if(sellOK&&sellScore>=64){side='SELL';score=sellScore;reason='2 candle bearish + harga di bawah EMA20 + EMA turun + momentum dan volume terkonfirmasi';}
+ else {const why=[];if(!notExtended)why.push('harga terlalu jauh dari EMA20 (anti-chase)');if(nearResistance)why.push('dekat resistance');if(nearSupport)why.push('dekat support');if(volumeRatio<0.55)why.push('volume sangat lemah');if(!prevBull&&!prevBear)why.push('candle sebelumnya doji');if(bull&&!prevBull||bear&&!prevBear)why.push('belum ada konfirmasi 2 candle');if(!emaUp&&!emaDown)why.push('kemiringan EMA20 lemah');if(Math.abs(mom)<0.08)why.push('momentum belum cukup');if(!why.length)why.push('syarat konfirmasi lengkap belum terpenuhi');reason=why.join(' · ');}
  return {side,score,decisionTime:c.time,reason,momentum:mom,ema:a.e,close:c.close,extension,volumeRatio};
 }
 
@@ -416,7 +416,7 @@ function scoreEarlyPair(cs){
  // Penalize late/extended entries instead of chasing candles after a large impulse.
  const penalty=Math.max(0,extension-.65)*14;long=Math.max(0,long-penalty);short=Math.max(0,short-penalty);
  const bias=long>=short?'LONG':'SHORT',score=Math.round(Math.max(long,short));
- if(score<48)return null;
+ if(score<40)return null;
  const fresh=(crossUp||crossDown||Math.abs(recent)<1.0)&&extension<1.25;
  return {score,bias,analysis:a,earlyScore:score,extension,fresh,closedTime:c.time,change:0,volume:0};
 }
@@ -435,7 +435,7 @@ async function scan(){
 
   // SCANNER SAJA: tidak pernah membuka/menutup order. Trading sepenuhnya manual.
   if(auto&&!killed&&(mode==='paper'||mode==='demo')&&Date.now()-lastSwitchAt>=HUNTER.cooldownMs){
-   const results=await Promise.all(universe.map(async x=>{try{const d=await bybitPublic('/v5/market/kline',{category:'linear',symbol:x.symbol,interval:tfApi(),limit:'80'});const kd=(d?.result?.list||[]).slice().reverse();const cs=kd.map(k=>({time:Math.floor(Number(k[0])/1000),open:+k[1],high:+k[2],low:+k[3],close:+k[4],volume:+k[5]}));const scored=scoreEarlyPair(cs);if(!scored)return null;return {symbol:x.symbol,...scored,change:Number(x.price24hPcnt)*100,volume:Number(x.turnover24h)};}catch{return null}}));
+   const results=await Promise.all(universe.map(async x=>{try{const d=await bybitPublic('/v5/market/kline',{category:'linear',symbol:x.symbol,interval:'5',limit:'80'});const kd=(d?.result?.list||[]).slice().reverse();const cs=kd.map(k=>({time:Math.floor(Number(k[0])/1000),open:+k[1],high:+k[2],low:+k[3],close:+k[4],volume:+k[5]}));const scored=scoreEarlyPair(cs);if(!scored)return null;return {symbol:x.symbol,...scored,change:Number(x.price24hPcnt)*100,volume:Number(x.turnover24h)};}catch{return null}}));
    const ranked=results.filter(x=>x&&!isPairLossBlocked(x.symbol)&&!(x.symbol===rotateAwaySymbol&&Date.now()<rotateAwayUntil)&&Number(manualPairSkipUntil[x.symbol]||0)<=Date.now()).map(x=>({...x,rankScore:x.score+(x.fresh?8:0)-(x.extension>1.2?8:0)})).sort((a,b)=>b.rankScore-a.rankScore),best=ranked[0],currentCandidate=ranked.find(x=>x.symbol===symbol),switchEdge=best?best.rankScore-(currentCandidate?.rankScore||0):0;
    const active=mode==='paper'?hasValidPaperPosition():(mode==='demo'?hasValidDemoPosition():false);
    const activeSymbol=mode==='paper'?paperPos?.symbol:(mode==='demo'?currentDemoPosition()?.symbol:null);
@@ -446,7 +446,7 @@ async function scan(){
    if(active){
     const holdPnl=mode==='paper'&&paperPos?currentPaperPnl(current?.c?.close||paperPos.entry):mode==='demo'&&currentDemoPosition()?demoPnlForPosition(currentDemoPosition()):0;
     $('#scanState').textContent=`POSISI AKTIF · ${activeSymbol} · ${currentScore.toFixed(0)}% · ${fmtIDR(holdPnl)} · SCANNER PAUSE`;
-   }else if(best&&best.symbol!==symbol&&best.rankScore>=58&&switchEdge>=HUNTER.switchAdvantage&&Date.now()-lastSwitchAt>=HUNTER.cooldownMs){
+   }else if(best&&best.symbol!==symbol&&best.rankScore>=52&&switchEdge>=HUNTER.switchAdvantage&&Date.now()-lastSwitchAt>=HUNTER.cooldownMs){
     const target=best.symbol, targetBias=best.bias, targetScore=best.score, targetFresh=best.fresh;
     await switchSymbol(target);
     const fresh=analyze();
@@ -460,7 +460,7 @@ async function scan(){
     }
    }else if(best){
     $('#scanState').textContent=`BEST ${best.symbol} · ${best.bias==='LONG'?'BUY':'SELL'} ${best.score} · ${best.fresh?'EARLY':'WAIT'} · MANUAL`;
-   }else $('#scanState').textContent='NO SIGNAL';
+   }else $('#scanState').textContent='BELUM ADA SETUP 5M · filter tren/momentum/anti-chase';
   }else{$('#scanState').textContent='BYBIT SCANNER READY · MANUAL TRADING'}
  }catch(e){log('Bybit scanner error: '+e.message);$('#scanState').textContent='BYBIT SCANNER ERROR'}finally{hunterBusy=false}
 }
