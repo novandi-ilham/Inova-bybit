@@ -108,7 +108,7 @@ const PAIR_LOSS_COOLDOWN_MS=30*60*1000;
 const HARD_RISK_PCT=0.20;
 const LONG_PREFERENCE_GAP=6;
 const scannerKlineCache=new Map();
-async function getScannerKlines(sym){const cacheKey=String(chartInterval)+':'+sym;const hit=scannerKlineCache.get(cacheKey);if(hit&&Date.now()-hit.at<5000)return hit.data;const d=await bybitPublic('/v5/market/kline',{category:'linear',symbol:sym,interval:'5',limit:'80'});const data=d?.result?.list||[];if(!data.length)throw new Error('Bybit kline kosong');scannerKlineCache.set(cacheKey,{at:Date.now(),data});return data;}
+async function getScannerKlines(sym){const cacheKey=String(chartInterval)+':'+sym;const hit=scannerKlineCache.get(cacheKey);if(hit&&Date.now()-hit.at<5000)return hit.data;const d=await bybitPublic('/v5/market/kline',{category:'linear',symbol:sym,interval:tfApi(),limit:'80'});const data=d?.result?.list||[];if(!data.length)throw new Error('Bybit kline kosong');scannerKlineCache.set(cacheKey,{at:Date.now(),data});return data;}
 const IDR=16000; const fmtP=n=>Number(n||0).toLocaleString('en-US',{maximumFractionDigits:priceDecimals(n)}); const fmtIDR=n=>'Rp '+Math.round(n||0).toLocaleString('id-ID');
 function priceDecimals(n){n=Math.abs(Number(n)||0);if(n>=1000)return 2;if(n>=100)return 3;if(n>=1)return 4;if(n>=0.1)return 5;if(n>=0.01)return 6;if(n>=0.001)return 7;return 8}
 function fmtTradeP(n){const d=priceDecimals(n);return Number(n||0).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d})}
@@ -199,21 +199,25 @@ function timeSignalData(){
  const volumeRatio=avgVol>0?(Number(c.volume)||0)/avgVol:1;
  const range=Math.max(c.high-c.low,Number.EPSILON),body=Math.abs(c.close-c.open),bodyPct=body/range;
  const upperWick=c.high-Math.max(c.open,c.close),lowerWick=Math.min(c.open,c.close)-c.low;
+ const upperRatio=upperWick/range,lowerRatio=lowerWick/range;
+ const wickSignal=upperRatio>=0.45&&upperRatio>lowerRatio*1.35?'sumbu atas panjang: tekanan jual/penolakan di atas':lowerRatio>=0.45&&lowerRatio>upperRatio*1.35?'sumbu bawah panjang: tekanan beli/penolakan di bawah':upperRatio>=0.30&&lowerRatio>=0.30?'sumbu dua arah panjang: volatilitas/ragu-ragu':'sumbu relatif pendek: penolakan belum dominan';
+ const wickBullReject=lowerRatio>=0.38&&lowerRatio>upperRatio*1.25;
+ const wickBearReject=upperRatio>=0.38&&upperRatio>lowerRatio*1.25;
  const cleanBull=lowerWick<=body*1.5 && upperWick<=body*1.8;
  const cleanBear=upperWick<=body*1.5 && lowerWick<=body*1.8;
  const nearResistance=(a.resistance>c.close)&&((a.resistance-c.close)/atrVal<0.65);
  const nearSupport=(a.support<c.close)&&((c.close-a.support)/atrVal<0.65);
  // More selective setup: two same-direction closes, aligned EMA slope, meaningful momentum,
  // adequate relative volume, no stretched entry, and no immediate nearby S/R obstacle.
- const buyOK=bull&&prevBull&&above&&emaUp&&mom>=0.08&&prevMom>-0.05&&bodyPct>=0.28&&volumeRatio>=0.55&&notExtended&&!nearResistance&&a.regime!=='EXTREME VOLATILITY';
- const sellOK=bear&&prevBear&&below&&emaDown&&mom<=-0.08&&prevMom<0.05&&bodyPct>=0.28&&volumeRatio>=0.55&&notExtended&&!nearSupport&&a.regime!=='EXTREME VOLATILITY';
+ const buyOK=bull&&prevBull&&above&&emaUp&&mom>=0.12&&prevMom>0&&bodyPct>=0.35&&cleanBull&&!wickBearReject&&volumeRatio>=0.75&&notExtended&&!nearResistance&&a.regime!=='EXTREME VOLATILITY';
+ const sellOK=bear&&prevBear&&below&&emaDown&&mom<=-0.12&&prevMom<0&&bodyPct>=0.35&&cleanBear&&!wickBullReject&&volumeRatio>=0.75&&notExtended&&!nearSupport&&a.regime!=='EXTREME VOLATILITY';
  const buyScore=Math.min(100,(bull?12:0)+(prevBull?12:0)+(above?18:0)+(emaUp?18:0)+(mom>0?Math.min(18,Math.abs(mom)*9):0)+(volumeRatio>=0.75?8:0)+(notExtended?7:0)+(cleanBull?7:0));
  const sellScore=Math.min(100,(bear?12:0)+(prevBear?12:0)+(below?18:0)+(emaDown?18:0)+(mom<0?Math.min(18,Math.abs(mom)*9):0)+(volumeRatio>=0.75?8:0)+(notExtended?7:0)+(cleanBear?7:0));
  let side='HOLD',score=Math.max(buyScore,sellScore),reason='';
- if(buyOK&&buyScore>=64){side='BUY';score=buyScore;reason='2 candle bullish + harga di atas EMA20 + EMA naik + momentum dan volume terkonfirmasi';}
- else if(sellOK&&sellScore>=64){side='SELL';score=sellScore;reason='2 candle bearish + harga di bawah EMA20 + EMA turun + momentum dan volume terkonfirmasi';}
- else {const why=[];if(!notExtended)why.push('harga terlalu jauh dari EMA20 (anti-chase)');if(nearResistance)why.push('dekat resistance');if(nearSupport)why.push('dekat support');if(volumeRatio<0.55)why.push('volume sangat lemah');if(!prevBull&&!prevBear)why.push('candle sebelumnya doji');if(bull&&!prevBull||bear&&!prevBear)why.push('belum ada konfirmasi 2 candle');if(!emaUp&&!emaDown)why.push('kemiringan EMA20 lemah');if(Math.abs(mom)<0.08)why.push('momentum belum cukup');if(!why.length)why.push('syarat konfirmasi lengkap belum terpenuhi');reason=why.join(' · ');}
- return {side,score,decisionTime:c.time,reason,momentum:mom,ema:a.e,close:c.close,extension,volumeRatio};
+ if(buyOK&&buyScore>=72){side='BUY';score=buyScore;reason='2 candle bullish + EMA20 dan momentum terkonfirmasi; '+wickSignal;}
+ else if(sellOK&&sellScore>=72){side='SELL';score=sellScore;reason='2 candle bearish + EMA20 dan momentum terkonfirmasi; '+wickSignal;}
+ else {const why=[];if(!notExtended)why.push('harga terlalu jauh dari EMA20');if(nearResistance)why.push('dekat resistance');if(nearSupport)why.push('dekat support');if(volumeRatio<0.75)why.push('volume lemah');if(!prevBull&&!prevBear)why.push('candle sebelumnya doji');if(bull&&!prevBull||bear&&!prevBear)why.push('belum ada konfirmasi 2 candle');if(!emaUp&&!emaDown)why.push('kemiringan EMA20 lemah');if(Math.abs(mom)<0.12)why.push('momentum belum cukup');if(wickBearReject)why.push('sumbu atas dominan: waspadai penolakan harga');if(wickBullReject)why.push('sumbu bawah dominan: waspadai pantulan harga');if(!why.length)why.push('syarat konfirmasi lengkap belum terpenuhi');reason=why.join(' · ')+' · '+wickSignal;}
+ return {side,score,decisionTime:c.time,reason,momentum:mom,ema:a.e,close:c.close,extension,volumeRatio,upperWick:upperRatio,lowerWick:lowerRatio,wickSignal,wickBullReject,wickBearReject};
 }
 
 let lastExitNoticeKey='',exitNoticeTimer=0;
@@ -247,11 +251,36 @@ function evaluateExitWarning(ts){
  box.className='entry-notice exit show';clearTimeout(exitNoticeTimer);exitNoticeTimer=setTimeout(()=>box.classList.remove('show'),16000);
  try{if(navigator.vibrate)navigator.vibrate([180,80,180])}catch{}log(`EXIT WARNING · ${side} ${p.symbol} · candle 5M menunjukkan pelemahan/arah berlawanan · manual only`);
 }
+function forecastFromLastWick(){
+ // Probabilistic heuristic from the last CLOSED 5m candle; never predicts a guaranteed outcome.
+ const src=entryCandles.length>=35?entryCandles:(normalizeTf(chartInterval)==='5m'?candles:[]);
+ const cs=src.slice(0,-1); if(cs.length<25)return null;
+ const c=cs.at(-1),p=cs.at(-2),p2=cs.at(-3); if(!c||!p||!p2)return null;
+ const a=analyzeData(cs); if(!a||!a.A)return null;
+ const range=Math.max(c.high-c.low,Number.EPSILON),body=Math.abs(c.close-c.open);
+ const upper=(c.high-Math.max(c.open,c.close))/range, lower=(Math.min(c.open,c.close)-c.low)/range;
+ const closePos=(c.close-c.low)/range;
+ const mom=(c.close-p.close)/a.A, prevMom=(p.close-p2.close)/a.A;
+ let bull=0,bear=0,why=[];
+ if(lower>=.42&&lower>upper*1.2){bull+=2;why.push('sumbu bawah panjang (penolakan bawah)')}
+ if(upper>=.42&&upper>lower*1.2){bear+=2;why.push('sumbu atas panjang (penolakan atas)')}
+ if(closePos>=.68)bull++; else if(closePos<=.32)bear++;
+ if(c.close>a.e&&a.emaSlope>0)bull++; if(c.close<a.e&&a.emaSlope<0)bear++;
+ if(mom>.12&&prevMom>0)bull++; if(mom<-.12&&prevMom<0)bear++;
+ // A long wick is only meaningful when close location and trend offer confirmation.
+ let direction='NETRAL',strength='lemah';
+ if(bull>=3&&bull>=bear+2){direction='POTENSI NAIK';strength=bull>=4?'lebih mendukung':'sedang'}
+ else if(bear>=3&&bear>=bull+2){direction='POTENSI TURUN';strength=bear>=4?'lebih mendukung':'sedang'}
+ else {direction='BELUM JELAS';strength='konfirmasi kurang';}
+ const summary=why.length?why.join(', '):'sumbu tidak memberi penolakan dominan';
+ return {direction,strength,summary,barTime:c.time,bull,bear,upper,lower};
+}
+function wickForecastText(){const f=forecastFromLastWick();if(!f)return 'Analisis sumbu: menunggu data candle 5M yang cukup.';return `Analisis sumbu candle 5M terakhir: ${f.direction} (${f.strength}) untuk 1–3 candle berikutnya, kira-kira 5–15 menit. ${f.summary}. Ini bias teknikal, bukan kepastian; tunggu konfirmasi candle berikutnya.`}
 function intervalSec(){const t=normalizeTf(chartInterval);const seconds={'1m':60,'3m':180,'5m':300,'15m':900,'30m':1800,'1h':3600,'2h':7200,'4h':14400,'6h':21600,'12h':43200,'1d':86400,'1w':604800,'1M':2592000};return seconds[t]||900}
 let lastEntryNoticeKey='',entryNoticeTimer=0;
-function showEntryNotice(ts){if(!ts||!['BUY','SELL'].includes(ts.side))return;const key=`${symbol}:5m:${ts.decisionTime}:${ts.side}`;if(key===lastEntryNoticeKey)return;lastEntryNoticeKey=key;if(!['BUY','SELL'].includes(ts.side)||Number(ts.score)<60)return;const box=$('#entryNotice'),title=$('#entryNoticeTitle'),text=$('#entryNoticeText');if(!box||!title||!text)return;box.className='entry-notice show '+ts.side.toLowerCase();title.textContent=`WAKTU ENTRY · ${ts.side} ${ts.side==='BUY'?'▲':'▼'} · ${symbol} · 5M`;text.textContent=`Sinyal candle 5M selesai · skor ${Math.round(ts.score)} · ${ts.reason||'cek chart dan risiko'}. Ini notifikasi saja—tekan tombol ${ts.side} manual jika setuju.`;clearTimeout(entryNoticeTimer);entryNoticeTimer=setTimeout(()=>box.classList.remove('show'),12000);try{if(navigator.vibrate)navigator.vibrate([100,50,100])}catch{}log(`ENTRY ALERT ${ts.side} · ${symbol} · 5M · score ${Math.round(ts.score)} · manual only`)}
+function showEntryNotice(ts){if(!ts||!['BUY','SELL'].includes(ts.side))return;const key=`${symbol}:5m:${ts.decisionTime}:${ts.side}`;if(key===lastEntryNoticeKey)return;lastEntryNoticeKey=key;if(!['BUY','SELL'].includes(ts.side)||Number(ts.score)<60)return;const box=$('#entryNotice'),title=$('#entryNoticeTitle'),text=$('#entryNoticeText');if(!box||!title||!text)return;box.className='entry-notice show '+ts.side.toLowerCase();title.textContent=`WAKTU ENTRY · ${ts.side} ${ts.side==='BUY'?'▲':'▼'} · ${symbol} · 5M`;text.textContent=`Sinyal candle 5M selesai · setup score ${Math.round(ts.score)} · ${ts.reason||'cek chart dan risiko'}. ${wickForecastText()} Ini notifikasi saja—konfirmasi chart dan risiko sebelum entry manual.`;clearTimeout(entryNoticeTimer);entryNoticeTimer=setTimeout(()=>box.classList.remove('show'),12000);try{if(navigator.vibrate)navigator.vibrate([100,50,100])}catch{}log(`ENTRY ALERT ${ts.side} · ${symbol} · 5M · score ${Math.round(ts.score)} · manual only`)}
 function updateClockWib(){const d=new Date();const p=new Intl.DateTimeFormat('id-ID',{timeZone:'Asia/Jakarta',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).formatToParts(d);const g=t=>p.find(x=>x.type===t)?.value||'';const el=$('#clockWib');if(el)el.textContent=`WIB ${g('hour')}:${g('minute')}:${g('second')}`;}
-function updateUI(){updateClockWib();const mtf=$('#marketIntelTf');if(mtf)mtf.textContent=(TF_LABEL&&TF_LABEL[normalizeTf(chartInterval)])||String(chartInterval||tf||'15M').toUpperCase();let a=analyze();if(!a)return;const ts=timeSignalData();if(ts){showEntryNotice(ts);evaluateExitWarning(ts);const se=$('#timeSignal'),te=$('#timeEntry');if(se){se.textContent=`5M ${ts.side} · ${Math.round(ts.score)}%`;se.className='tag '+(ts.side==='BUY'?'up':ts.side==='SELL'?'down':'yellow')}if(te){const ec=entryCandles.at(-1);let n=Math.max(0,Math.floor(((ec?.time||a.c.time)+300)-nowMarketMs()/1000));te.textContent=`5M NEXT ${Math.floor(n/60)}:${String(n%60).padStart(2,'0')}`;}}const displayPrice=livePrice||a.c.close;$('#lastPrice').textContent=fmtP(displayPrice);$('#ohlc').textContent=`O ${fmtP(a.c.open)} · H ${fmtP(a.c.high)} · L ${fmtP(a.c.low)} · C ${fmtP(a.c.close)}`;$('#candleDir').textContent=a.bull?'CANDLE BULLISH':a.bear?'CANDLE BEARISH':'DOJI';$('#candleDir').className='tag '+(a.bull?'up':a.bear?'down':'yellow');$('#ema').textContent=fmtP(a.e);$('#confidence').textContent=a.score.toFixed(0)+'%';$('#confidenceBar').style.width=a.score+'%';$('#bias').textContent=a.bias;$('#bias').className=a.bias==='LONG'?'up':a.bias==='SHORT'?'down':'yellow';$('#regime').textContent='REGIME '+a.regime;$('#noTrade').textContent=a.allowed?'TRADE CHECK ✓':'NO TRADE';$('#noTrade').className='tag '+(a.allowed?'up':'down');$('#reason').textContent=`S/R ${fmtP(a.support)} / ${fmtP(a.resistance)} · ATR ${fmtP(a.A)} · Volume x${a.vol.toFixed(2)} · Wick U ${a.wU.toFixed(2)} / L ${a.wL.toFixed(2)}`;$('#engineScore').textContent=a.score.toFixed(0);$('#guardReasons').innerHTML=a.reasons.length?a.reasons.map(x=>`<div>⚠ ${x}</div>`).join(''):'<div class="up">✓ Guard conditions clear.</div>';let rem=a.c.time+intervalSec()-nowMarketMs()/1000;const remain=Math.max(0,Math.floor(rem)); const mm=Math.floor(remain/60), ss=remain%60; $('#candleTimer').textContent=`CLOSE ${mm}:${String(ss).padStart(2,'0')} · WIB`;let slPct=Number($('#slPct').value)/100,rr=Number($('#rr').value);let sl=a.bias==='SHORT'?a.c.close*(1+slPct):a.c.close*(1-slPct),tp=a.bias==='SHORT'?a.c.close*(1-slPct*rr):a.c.close*(1+slPct*rr);$('#slOut').textContent=fmtP(sl);$('#tpOut').textContent=fmtP(tp);if(hasValidPaperPosition()&&mode==='paper')updatePosition(displayPrice);else if(mode==='paper')updatePaperAccount(0);syncPaperStateUI(a);renderIndicatorPanel();updateBtHeader()}
+function updateUI(){updateClockWib();const mtf=$('#marketIntelTf');if(mtf)mtf.textContent=(TF_LABEL&&TF_LABEL[normalizeTf(chartInterval)])||String(chartInterval||tf||'15M').toUpperCase();let a=analyze();if(!a)return;const ts=timeSignalData();if(ts){showEntryNotice(ts);evaluateExitWarning(ts);const se=$('#timeSignal'),te=$('#timeEntry');if(se){se.textContent=`5M ${ts.side} · ${Math.round(ts.score)}%`;se.className='tag '+(ts.side==='BUY'?'up':ts.side==='SELL'?'down':'yellow')}if(te){const ec=entryCandles.at(-1);let n=Math.max(0,Math.floor(((ec?.time||a.c.time)+300)-nowMarketMs()/1000));te.textContent=`5M NEXT ${Math.floor(n/60)}:${String(n%60).padStart(2,'0')}`;}}const displayPrice=livePrice||a.c.close;$('#lastPrice').textContent=fmtP(displayPrice);$('#ohlc').textContent=`O ${fmtP(a.c.open)} · H ${fmtP(a.c.high)} · L ${fmtP(a.c.low)} · C ${fmtP(a.c.close)}`;$('#candleDir').textContent=a.bull?'CANDLE BULLISH':a.bear?'CANDLE BEARISH':'DOJI';$('#candleDir').className='tag '+(a.bull?'up':a.bear?'down':'yellow');$('#ema').textContent=fmtP(a.e);$('#confidence').textContent=a.score.toFixed(0)+'%';$('#confidenceBar').style.width=a.score+'%';$('#bias').textContent=a.bias;$('#bias').className=a.bias==='LONG'?'up':a.bias==='SHORT'?'down':'yellow';$('#regime').textContent='REGIME '+a.regime;$('#noTrade').textContent=a.allowed?'TRADE CHECK ✓':'NO TRADE';$('#noTrade').className='tag '+(a.allowed?'up':'down');const wf=forecastFromLastWick();$('#reason').textContent=`S/R ${fmtP(a.support)} / ${fmtP(a.resistance)} · ATR ${fmtP(a.A)} · Volume x${a.vol.toFixed(2)} · Wick U ${a.wU.toFixed(2)} / L ${a.wL.toFixed(2)} · ${wf?wf.direction+' '+wf.strength+' (5–15m)':'WICK: menunggu data 5M'}`;$('#engineScore').textContent=a.score.toFixed(0);$('#guardReasons').innerHTML=a.reasons.length?a.reasons.map(x=>`<div>⚠ ${x}</div>`).join(''):'<div class="up">✓ Guard conditions clear.</div>';let rem=a.c.time+intervalSec()-nowMarketMs()/1000;const remain=Math.max(0,Math.floor(rem)); const mm=Math.floor(remain/60), ss=remain%60; $('#candleTimer').textContent=`CLOSE ${mm}:${String(ss).padStart(2,'0')} · WIB`;let slPct=Number($('#slPct').value)/100,rr=Number($('#rr').value);let sl=a.bias==='SHORT'?a.c.close*(1+slPct):a.c.close*(1-slPct),tp=a.bias==='SHORT'?a.c.close*(1-slPct*rr):a.c.close*(1+slPct*rr);$('#slOut').textContent=fmtP(sl);$('#tpOut').textContent=fmtP(tp);if(hasValidPaperPosition()&&mode==='paper')updatePosition(displayPrice);else if(mode==='paper')updatePaperAccount(0);syncPaperStateUI(a);renderIndicatorPanel();updateBtHeader()}
 function initChart(){
  const host=$('#chart');
  if(!host)return;
@@ -416,7 +445,7 @@ function scoreEarlyPair(cs){
  // Penalize late/extended entries instead of chasing candles after a large impulse.
  const penalty=Math.max(0,extension-.65)*14;long=Math.max(0,long-penalty);short=Math.max(0,short-penalty);
  const bias=long>=short?'LONG':'SHORT',score=Math.round(Math.max(long,short));
- if(score<40)return null;
+ if(score<48)return null;
  const fresh=(crossUp||crossDown||Math.abs(recent)<1.0)&&extension<1.25;
  return {score,bias,analysis:a,earlyScore:score,extension,fresh,closedTime:c.time,change:0,volume:0};
 }
@@ -435,7 +464,7 @@ async function scan(){
 
   // SCANNER SAJA: tidak pernah membuka/menutup order. Trading sepenuhnya manual.
   if(auto&&!killed&&(mode==='paper'||mode==='demo')&&Date.now()-lastSwitchAt>=HUNTER.cooldownMs){
-   const results=await Promise.all(universe.map(async x=>{try{const d=await bybitPublic('/v5/market/kline',{category:'linear',symbol:x.symbol,interval:'5',limit:'80'});const kd=(d?.result?.list||[]).slice().reverse();const cs=kd.map(k=>({time:Math.floor(Number(k[0])/1000),open:+k[1],high:+k[2],low:+k[3],close:+k[4],volume:+k[5]}));const scored=scoreEarlyPair(cs);if(!scored)return null;return {symbol:x.symbol,...scored,change:Number(x.price24hPcnt)*100,volume:Number(x.turnover24h)};}catch{return null}}));
+   const results=await Promise.all(universe.map(async x=>{try{const d=await bybitPublic('/v5/market/kline',{category:'linear',symbol:x.symbol,interval:tfApi(),limit:'80'});const kd=(d?.result?.list||[]).slice().reverse();const cs=kd.map(k=>({time:Math.floor(Number(k[0])/1000),open:+k[1],high:+k[2],low:+k[3],close:+k[4],volume:+k[5]}));const scored=scoreEarlyPair(cs);if(!scored)return null;return {symbol:x.symbol,...scored,change:Number(x.price24hPcnt)*100,volume:Number(x.turnover24h)};}catch{return null}}));
    const ranked=results.filter(x=>x&&!isPairLossBlocked(x.symbol)&&!(x.symbol===rotateAwaySymbol&&Date.now()<rotateAwayUntil)&&Number(manualPairSkipUntil[x.symbol]||0)<=Date.now()).map(x=>({...x,rankScore:x.score+(x.fresh?8:0)-(x.extension>1.2?8:0)})).sort((a,b)=>b.rankScore-a.rankScore),best=ranked[0],currentCandidate=ranked.find(x=>x.symbol===symbol),switchEdge=best?best.rankScore-(currentCandidate?.rankScore||0):0;
    const active=mode==='paper'?hasValidPaperPosition():(mode==='demo'?hasValidDemoPosition():false);
    const activeSymbol=mode==='paper'?paperPos?.symbol:(mode==='demo'?currentDemoPosition()?.symbol:null);
@@ -446,7 +475,7 @@ async function scan(){
    if(active){
     const holdPnl=mode==='paper'&&paperPos?currentPaperPnl(current?.c?.close||paperPos.entry):mode==='demo'&&currentDemoPosition()?demoPnlForPosition(currentDemoPosition()):0;
     $('#scanState').textContent=`POSISI AKTIF · ${activeSymbol} · ${currentScore.toFixed(0)}% · ${fmtIDR(holdPnl)} · SCANNER PAUSE`;
-   }else if(best&&best.symbol!==symbol&&best.rankScore>=52&&switchEdge>=HUNTER.switchAdvantage&&Date.now()-lastSwitchAt>=HUNTER.cooldownMs){
+   }else if(best&&best.symbol!==symbol&&best.rankScore>=58&&switchEdge>=HUNTER.switchAdvantage&&Date.now()-lastSwitchAt>=HUNTER.cooldownMs){
     const target=best.symbol, targetBias=best.bias, targetScore=best.score, targetFresh=best.fresh;
     await switchSymbol(target);
     const fresh=analyze();
@@ -460,7 +489,7 @@ async function scan(){
     }
    }else if(best){
     $('#scanState').textContent=`BEST ${best.symbol} · ${best.bias==='LONG'?'BUY':'SELL'} ${best.score} · ${best.fresh?'EARLY':'WAIT'} · MANUAL`;
-   }else $('#scanState').textContent='BELUM ADA SETUP 5M · filter tren/momentum/anti-chase';
+   }else $('#scanState').textContent='NO SIGNAL';
   }else{$('#scanState').textContent='BYBIT SCANNER READY · MANUAL TRADING'}
  }catch(e){log('Bybit scanner error: '+e.message);$('#scanState').textContent='BYBIT SCANNER ERROR'}finally{hunterBusy=false}
 }
