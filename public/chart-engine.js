@@ -3,7 +3,7 @@ class CanvasChart {
   constructor(host){
     this.host=host; host.innerHTML='';
     this.canvas=document.createElement('canvas'); this.canvas.className='chart'; host.appendChild(this.canvas);
-    this.ctx=this.canvas.getContext('2d'); this.candles=[]; this.ema=[]; this.markers=[]; this.position=null; this.srLevels=null; this.offset=0; this.visible=90; this.drag=false; this.lastX=0; this.pointers=new Map(); this.lastPinchDistance=0; this.lastTap=0; this.panStartOffset=0;
+    this.ctx=this.canvas.getContext('2d'); this.candles=[]; this.ema=[]; this.markers=[]; this.position=null; this.srLevels=null; this.offset=0; this.visible=50; this.drag=false; this.lastX=0; this.pointers=new Map(); this.lastPinchDistance=0; this.lastTap=0; this.panStartOffset=0;
     this.series={setData:d=>{this.setCandles(d.map(x=>({...x,volume:0})))},update:d=>{this.updateCandle(d)},createPriceLine:o=>{const x={...o};this.positionLines??=[];this.positionLines.push(x);this.render();return x},removePriceLine:x=>{this.positionLines=(this.positionLines||[]).filter(y=>y!==x);this.render()},setMarkers:m=>{this.setMarkers(m)}};
     this.emaSeries={setData:d=>{this.ema=d.map(x=>x.value);this.render()},update:d=>{this.ema[this.candles.length-1]=d.value;this.render()}};
     this.resizeObserver=new ResizeObserver(()=>this.resize()); this.resizeObserver.observe(host); this.resize();
@@ -55,7 +55,7 @@ class CanvasChart {
   setMarkers(m){this.markers=Array.isArray(m)?m.slice(-50):[];this.render()}
   setPosition(p){this.position=p;this.render()}
   setSR(x){this.srLevels=x;this.render()}
-  fitContent(){this.visible=Math.min(90,Math.max(30,this.candles.length));this.offset=0;this.clamp();this.render()}
+  fitContent(){this.visible=Math.min(50,Math.max(30,this.candles.length));this.offset=0;this.clamp();this.render()}
   clamp(){const maxOffset=Math.max(0,this.candles.length-Math.max(30,Math.min(170,this.visible||90)));this.offset=Math.max(0,Math.min(this.offset,maxOffset))}
   distance(){const a=[...this.pointers.values()];if(a.length<2)return 0;return Math.hypot(a[0].x-a[1].x,a[0].y-a[1].y)}
   centerX(){const a=[...this.pointers.values()];if(!a.length)return this.host.clientWidth/2;return a.reduce((n,p)=>n+p.x,0)/a.length}
