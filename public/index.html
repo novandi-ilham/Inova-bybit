@@ -364,15 +364,41 @@ let lastEntryNoticeKey='',entryNoticeTimer=0;
 function showEntryNotice(ts){if(!ts||!['BUY','SELL'].includes(ts.side))return;const key=`${symbol}:5m:${ts.decisionTime}:${ts.side}`;if(key===lastEntryNoticeKey)return;lastEntryNoticeKey=key;if(!['BUY','SELL'].includes(ts.side)||Number(ts.score)<60)return;const box=$('#entryNotice'),title=$('#entryNoticeTitle'),text=$('#entryNoticeText');if(!box||!title||!text)return;box.className='entry-notice show '+ts.side.toLowerCase();title.textContent=`WAKTU ENTRY · ${ts.side} ${ts.side==='BUY'?'▲':'▼'} · ${symbol} · 5M`;text.textContent=`Sinyal candle 5M selesai · setup score ${Math.round(ts.score)} · ${ts.reason||'cek chart dan risiko'}. ${wickForecastText()} Ini notifikasi saja—konfirmasi chart dan risiko sebelum entry manual.`;clearTimeout(entryNoticeTimer);entryNoticeTimer=setTimeout(()=>box.classList.remove('show'),12000);try{if(navigator.vibrate)navigator.vibrate([100,50,100])}catch{}log(`ENTRY ALERT ${ts.side} · ${symbol} · 5M · score ${Math.round(ts.score)} · manual only`)}
 function updateClockWib(){const d=new Date();const p=new Intl.DateTimeFormat('id-ID',{timeZone:'Asia/Jakarta',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).formatToParts(d);const g=t=>p.find(x=>x.type===t)?.value||'';const el=$('#clockWib');if(el)el.textContent=`WIB ${g('hour')}:${g('minute')}:${g('second')}`;}
 function marketIntegrityCheck(){
- const close=Number(candles.at(-1)?.close||0),px=Number(livePrice||0);
+ const close=Number(candles.at(-1)?.close||0),px=Number(livePrice||0),rest=Number(restVerifiedPrice||0);
  if(!symbol||!/[A-Z0-9]{5,20}/.test(symbol))return {ok:false,label:'SYMBOL INVALID',detail:'Simbol pair tidak valid.'};
  if(!(close>0))return {ok:false,label:'NO CANDLE',detail:'Harga candle belum tersedia.'};
- if(!(px>0))return {ok:false,label:'WAIT TICKER',detail:'Menunggu ticker Bybit untuk simbol '+symbol+'.'};
- const diff=Math.abs(px-close)/close*100;
- // A live ticker and the active candle for the same linear symbol should be in a
- // comparable price range. A large discrepancy usually indicates stale/mixed data.
- if(diff>7.5)return {ok:false,label:'PRICE MISMATCH',detail:`Ticker ${symbol} ${fmtP(px)} berbeda ${diff.toFixed(2)}% dari candle ${fmtP(close)}; tahan entry dan periksa pair/data.`};
- return {ok:true,label:'PAIR OK · '+symbol,detail:`Ticker dan candle ${symbol} selaras (selisih ${diff.toFixed(2)}%).`};
+ if(!(px>0))return {ok:false,label:'WAIT TICKER',detail:'Menunggu ticker WebSocket Bybit untuk '+symbol+'.'};
+ if(restVerifiedSymbol!==symbol||!(rest>0)||Date.now()-restVerifiedAt>15000)return {ok:false,label:'WAIT REST VERIFY',detail:'Ticker REST independen belum terverifikasi/terlalu lama; tahan entry sampai harga REST dan WebSocket cocok.'};
+ const restVsWs=Math.abs(rest-px)/rest*100,restVsCandle=Math.abs(rest-close)/rest*100;
+ if(restVsWs>1)return {ok:false,label:'WS/REST PRICE MISMATCH',detail:`Ticker REST ${fmtP(rest)} berbeda ${restVsWs.toFixed(2)}% dari WebSocket ${fmtP(px)} untuk ${symbol}; tahan entry.`};
+ if(restVsCandle>2)return {ok:false,label:'CANDLE PRICE MISMATCH',detail:`Ticker REST ${fmtP(rest)} berbeda ${restVsCandle.toFixed(2)}% dari candle ${fmtP(close)} untuk ${symbol}; data chart belum sinkron, tahan entry.`};
+ return {ok:true,label:'PAIR VERIFIED · '+symbol,detail:`REST ${fmtP(rest)}, WS ${fmtP(px)}, candle ${fmtP(close)}; perbedaan harga dalam batas.`};
+}
+async function verifyMarketTicker(targetSymbol=symbol,gen=symbolGeneration){
+ if(restVerifyBusy)return;restVerifyBusy=true;
+ try{
+  const d=await bybitPublic('/v5/market/tickers',{category:'linear',symbol:String(targetSymbol).toUpperCase()});
+  if(gen!==symbolGeneration||targetSymbol!==symbol)return;
+  const rows=d?.result?.list||[],row=rows.find(x=>String(x.symbol||'').toUpperCase()===targetSymbol.toUpperCase()),price=Number(row?.lastPrice||0);
+  if(!row||!(price>0))throw new Error('Ticker REST tidak mengembalikan simbol yang diminta');
+  restVerifiedPrice=price;restVerifiedAt=Date.now();restVerifiedSymbol=targetSymbol;
+  // If the chart's last candle is far from the authoritative REST ticker, bypass local cache
+  // and request fresh exchange candles. Only accept them if their latest close is price-consistent.
+  const currentClose=Number(candles.at(-1)?.close||0);
+  if(currentClose>0&&Math.abs(price-currentClose)/price*100>2){
+   try{
+    const fresh=await fetchBybitKlines(targetSymbol,150,chartInterval);
+    if(gen!==symbolGeneration||targetSymbol!==symbol)return;
+    const freshClose=Number(fresh.at(-1)?.close||0);
+    if(fresh.length>=30&&freshClose>0&&Math.abs(price-freshClose)/price*100<=2){candles=fresh.slice(-150);lastRestKlineTime=candles.at(-1)?.time||0;saveCandleCache(targetSymbol);redraw();$('#conn').textContent='FRESH REST CANDLES LOADED · VERIFYING WS';}
+    else {$('#conn').textContent='DATA MISMATCH · ENTRY LOCKED';}
+   }catch{$('#conn').textContent='DATA MISMATCH · ENTRY LOCKED';}
+  }
+  // REST ticker is an independent cross-check. Never auto-correct prices by scaling them.
+  const q=marketIntegrityCheck();if(!q.ok&&/MISMATCH/.test(q.label))$('#conn').textContent='DATA MISMATCH · ENTRY LOCKED';
+  renderMarketIntegrity();renderFinalSignal();
+ }catch(e){if(gen===symbolGeneration&&targetSymbol===symbol){restVerifiedAt=0;renderMarketIntegrity();renderFinalSignal();log('Ticker REST verification failed: '+e.message)}}
+ finally{restVerifyBusy=false}
 }
 function renderMarketIntegrity(){
  const el=$('#marketIntegrity');if(!el)return;
@@ -449,7 +475,7 @@ function redraw(){
  }catch(e){log('Chart render error: '+e.message)}
  updateUI();
 }
-let wsReconnectTimer=null, wsWatchdogTimer=null, realtimeFallbackTimer=null, wsGeneration=0, lastWsKlineAt=0, lastWsTickerAt=0, lastWsSource='NONE', lastRestSyncAt=0, lastRestKlineTime=0, restBusy=false, marketSeq=0, livePrice=0, liveMarkPrice=0, livePriceRaf=0;
+let wsReconnectTimer=null, wsWatchdogTimer=null, realtimeFallbackTimer=null, wsGeneration=0, lastWsKlineAt=0, lastWsTickerAt=0, lastWsSource='NONE', lastRestSyncAt=0, lastRestKlineTime=0, restBusy=false, marketSeq=0, livePrice=0, liveMarkPrice=0, livePriceRaf=0, restVerifiedPrice=0, restVerifiedAt=0, restVerifiedSymbol='', restVerifyBusy=false;
 function cacheKey(s=symbol){return `ilhamMarketCandles:${marketProvider}:${s}:${normalizeTf(chartInterval)}`}
 function saveCandleCache(s=symbol){try{if(candles.length>=30)localStorage.setItem(cacheKey(s),JSON.stringify({savedAt:Date.now(),candles:candles.slice(-150)}))}catch{}}
 function loadCandleCache(s=symbol){try{const x=JSON.parse(localStorage.getItem(cacheKey(s)||'')||'null');if(!x||!Array.isArray(x.candles)||x.candles.length<30)return false;const age=Date.now()-Number(x.savedAt||0);if(age>12*60*60*1000)return false;candles=x.candles.map(c=>({...c,time:Number(c.time)})).filter(c=>[c.time,c.open,c.high,c.low,c.close,c.volume].every(Number.isFinite)).slice(-150);redraw();return candles.length>=30}catch{return false}}
@@ -548,11 +574,11 @@ async function switchSymbol(s){
  const gen=++symbolGeneration;
  try{drawings.forEach(x=>x.remove?.())}catch{} drawings=[]; tradeMarkers=tradeMarkers.filter(m=>m&&m.symbol===s); clearPositionVisuals();
  try{ws?.close()}catch{} clearTimeout(wsReconnectTimer); clearInterval(wsWatchdogTimer);
- symbol=s; candles=[]; livePrice=0; liveMarkPrice=0; lastWsKlineAt=0; lastWsTickerAt=0; $('#symbolTitle').textContent=s+' · LINEAR'; updatePairLossUI(s); $('#conn').textContent='LOADING '+s+' · MARKET DATA'; lastSwitchAt=Date.now(); redraw();
+ symbol=s; candles=[]; livePrice=0; liveMarkPrice=0; restVerifiedPrice=0; restVerifiedAt=0; restVerifiedSymbol=''; lastWsKlineAt=0; lastWsTickerAt=0; $('#symbolTitle').textContent=s+' · LINEAR'; updatePairLossUI(s); $('#conn').textContent='LOADING '+s+' · MARKET DATA'; lastSwitchAt=Date.now(); redraw();
  const ok=await loadCandles(s,gen);
  await loadEntryCandles(s,gen);
  if(!ok||gen!==symbolGeneration||s!==symbol)return;
- if(chart)chart.fitContent(); renderTradeVisuals(); connectWS(s,gen); updateBtHeader(); loadBtOrderBook(); persist(); log('Pair → '+s+' · '+marketProvider+' '+(TF_LABEL[normalizeTf(chartInterval)]||chartInterval)+' synced');
+ if(chart)chart.fitContent(); renderTradeVisuals(); connectWS(s,gen); verifyMarketTicker(s,gen).catch(()=>{}); updateBtHeader(); loadBtOrderBook(); persist(); log('Pair → '+s+' · '+marketProvider+' '+(TF_LABEL[normalizeTf(chartInterval)]||chartInterval)+' synced');
 }
 function drawSR(){
  if(!chart)return;
@@ -836,6 +862,6 @@ function initV25BybitUI(){
  updateBtHeader();loadBtOrderBook();clearInterval(btOrderBookTimer);btOrderBookTimer=setInterval(()=>{loadBtOrderBook();updateBtHeader()},2000);
 }
 
-(async()=>{killed=false;auto=true;$('#autoToggle').textContent='PAIR SCAN ONLY';$('#autoToggle').classList.add('active');$('#killBtn').textContent='ENTRY LOCK: OFF';$('#killBtn').classList.remove('active');initChart();restore();updatePairLossUI(symbol);renderPaperOrderPreview();$('#symbolTitle').textContent=symbol+' · LINEAR';symbolGeneration++;const bootGen=symbolGeneration;try{await diagnoseMarketAccess();await syncMarketClock();setInterval(syncMarketClock,30000);const historyOK=await loadCandles(symbol,bootGen);await loadEntryCandles(symbol,bootGen);if(bootGen===symbolGeneration){connectWS(symbol,bootGen);}renderPosition();initV25BybitUI();initV26IndicatorUI();if(historyOK)await scan();else { $('#scanState').textContent='BYBIT MARKET BLOCKED'; $('#conn').textContent=`MARKET UNAVAILABLE · ${marketDiagnostic.direct} · ${marketDiagnostic.proxy}`; }log('System ready · BYBIT LINEAR · '+(TF_LABEL[normalizeTf(chartInterval)]||chartInterval)+' · WebSocket-first · REST history/reconciliation')}catch(e){log('Init error: '+e.message);try{connectWS(symbol,bootGen)}catch{}}setInterval(updateUI,1000);setInterval(()=>{if(mode==='demo')account().catch(()=>{});},2000);setInterval(()=>{if(mode==='demo')fetchDemoHistory().catch(()=>{});},7000);setInterval(scan,HUNTER.scanMs)})();
+(async()=>{killed=false;auto=true;$('#autoToggle').textContent='PAIR SCAN ONLY';$('#autoToggle').classList.add('active');$('#killBtn').textContent='ENTRY LOCK: OFF';$('#killBtn').classList.remove('active');initChart();restore();updatePairLossUI(symbol);renderPaperOrderPreview();$('#symbolTitle').textContent=symbol+' · LINEAR';symbolGeneration++;const bootGen=symbolGeneration;try{await diagnoseMarketAccess();await syncMarketClock();setInterval(syncMarketClock,30000);const historyOK=await loadCandles(symbol,bootGen);await loadEntryCandles(symbol,bootGen);if(bootGen===symbolGeneration){connectWS(symbol,bootGen);}renderPosition();initV25BybitUI();initV26IndicatorUI();if(historyOK)await scan();else { $('#scanState').textContent='BYBIT MARKET BLOCKED'; $('#conn').textContent=`MARKET UNAVAILABLE · ${marketDiagnostic.direct} · ${marketDiagnostic.proxy}`; }log('System ready · BYBIT LINEAR · '+(TF_LABEL[normalizeTf(chartInterval)]||chartInterval)+' · WebSocket-first · REST history/reconciliation')}catch(e){log('Init error: '+e.message);try{connectWS(symbol,bootGen)}catch{}}setInterval(updateUI,1000);verifyMarketTicker(symbol,symbolGeneration).catch(()=>{});setInterval(()=>verifyMarketTicker(symbol,symbolGeneration).catch(()=>{}),8000);setInterval(()=>{if(mode==='demo')account().catch(()=>{});},2000);setInterval(()=>{if(mode==='demo')fetchDemoHistory().catch(()=>{});},7000);setInterval(scan,HUNTER.scanMs)})();
 
 </script></body></html>
