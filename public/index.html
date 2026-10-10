@@ -254,31 +254,77 @@ function evaluateExitWarning(ts){
  try{if(navigator.vibrate)navigator.vibrate([180,80,180])}catch{}log(`EXIT WARNING · ${side} ${p.symbol} · candle 5M menunjukkan pelemahan/arah berlawanan · manual only`);
 }
 function forecastFromLastWick(){
- // Probabilistic heuristic from the last CLOSED 5m candle; never predicts a guaranteed outcome.
+ // Probabilistic heuristic: evaluates the last 3 CLOSED 5m candles, not a guaranteed forecast.
  const src=entryCandles.length>=35?entryCandles:(normalizeTf(chartInterval)==='5m'?candles:[]);
  const cs=src.slice(0,-1); if(cs.length<25)return null;
- const c=cs.at(-1),p=cs.at(-2),p2=cs.at(-3); if(!c||!p||!p2)return null;
+ const recent=cs.slice(-3); if(recent.length<3)return null;
+ const c=recent[2],p=recent[1],p2=recent[0];
  const a=analyzeData(cs); if(!a||!a.A)return null;
- const range=Math.max(c.high-c.low,Number.EPSILON),body=Math.abs(c.close-c.open);
- const upper=(c.high-Math.max(c.open,c.close))/range, lower=(Math.min(c.open,c.close)-c.low)/range;
- const closePos=(c.close-c.low)/range;
- const mom=(c.close-p.close)/a.A, prevMom=(p.close-p2.close)/a.A;
+ const shape=x=>{
+   const range=Math.max(x.high-x.low,Number.EPSILON);
+   const upper=(x.high-Math.max(x.open,x.close))/range;
+   const lower=(Math.min(x.open,x.close)-x.low)/range;
+   const closePos=(x.close-x.low)/range;
+   const body=Math.abs(x.close-x.open)/range;
+   return {range,upper,lower,closePos,body,bull:x.close>x.open,bear:x.close<x.open};
+ };
+ const sh=recent.map(shape), last=sh[2];
+ const mom1=(c.close-p.close)/a.A, mom2=(p.close-p2.close)/a.A;
  let bull=0,bear=0,why=[];
- if(lower>=.42&&lower>upper*1.2){bull+=2;why.push('sumbu bawah panjang (penolakan bawah)')}
- if(upper>=.42&&upper>lower*1.2){bear+=2;why.push('sumbu atas panjang (penolakan atas)')}
- if(closePos>=.68)bull++; else if(closePos<=.32)bear++;
- if(c.close>a.e&&a.emaSlope>0)bull++; if(c.close<a.e&&a.emaSlope<0)bear++;
- if(mom>.12&&prevMom>0)bull++; if(mom<-.12&&prevMom<0)bear++;
- // A long wick is only meaningful when close location and trend offer confirmation.
- let direction='NETRAL',strength='lemah';
- if(bull>=3&&bull>=bear+2){direction='POTENSI NAIK';strength=bull>=4?'lebih mendukung':'sedang'}
- else if(bear>=3&&bear>=bull+2){direction='POTENSI TURUN';strength=bear>=4?'lebih mendukung':'sedang'}
- else {direction='BELUM JELAS';strength='konfirmasi kurang';}
- const summary=why.length?why.join(', '):'sumbu tidak memberi penolakan dominan';
- return {direction,strength,summary,barTime:c.time,bull,bear,upper,lower};
+ // Weight the latest candle most, but require repeated evidence across 2-3 candles.
+ const lowerReject=sh.filter(x=>x.lower>=.35&&x.lower>x.upper*1.15).length;
+ const upperReject=sh.filter(x=>x.upper>=.35&&x.upper>x.lower*1.15).length;
+ if(last.lower>=.38&&last.lower>last.upper*1.15){bull+=2;why.push('sumbu bawah candle terakhir dominan')}
+ else if(lowerReject>=2){bull+=2;why.push('penolakan bawah berulang pada 2–3 candle')}
+ if(last.upper>=.38&&last.upper>last.lower*1.15){bear+=2;why.push('sumbu atas candle terakhir dominan')}
+ else if(upperReject>=2){bear+=2;why.push('penolakan atas berulang pada 2–3 candle')}
+ // Close location of the last candle and recent candle sequence.
+ if(last.closePos>=.68)bull++; else if(last.closePos<=.32)bear++;
+ const greenCount=sh.filter(x=>x.bull).length, redCount=sh.filter(x=>x.bear).length;
+ if(greenCount>=2)bull++; if(redCount>=2)bear++;
+ // Avoid treating a wick alone as direction: confirm with trend and momentum.
+ if(c.close>a.e&&a.emaSlope>0)bull++;
+ if(c.close<a.e&&a.emaSlope<0)bear++;
+ if(mom1>.10&&mom2>0)bull++;
+ if(mom1<-.10&&mom2<0)bear++;
+ // If upper/lower rejection are both frequent, mark as conflict.
+ const mixedRejection=lowerReject>0&&upperReject>0;
+ let direction='BELUM JELAS',strength='konfirmasi kurang';
+ if(bull>=3&&bull>=bear+2&&!mixedRejection){direction='POTENSI NAIK';strength=bull>=5?'dukungan relatif kuat':'sedang'}
+ else if(bear>=3&&bear>=bull+2&&!mixedRejection){direction='POTENSI TURUN';strength=bear>=5?'dukungan relatif kuat':'sedang'}
+ else if(mixedRejection)why.push('sumbu atas dan bawah sama-sama muncul; pasar tarik-menarik');
+ const summary=why.length?why.join('; '):'pola 2–3 candle belum menunjukkan penolakan dominan';
+ return {direction,strength,summary,barTime:c.time,bull,bear,upper:last.upper,lower:last.lower,
+   upperReject,lowerReject,greenCount,redCount,mom1,mom2};
 }
 function wickForecastText(){const f=forecastFromLastWick();if(!f)return 'Analisis sumbu: menunggu data candle 5M yang cukup.';return `Analisis sumbu candle 5M terakhir: ${f.direction} (${f.strength}) untuk 1–3 candle berikutnya, kira-kira 5–15 menit. ${f.summary}. Ini bias teknikal, bukan kepastian; tunggu konfirmasi candle berikutnya.`}
-function renderWickForecast(){const f=forecastFromLastWick();const ids=[['wick2m', 'wick2mSub'],['wick5m','wick5mSub'],['wick15m','wick15mSub']];if(!f){ids.forEach(([a,b])=>{if($('#'+a))$('#'+a).textContent='Menunggu data';if($('#'+b))$('#'+b).textContent='butuh candle 5M tertutup'});$('#wickForecastDetail').textContent='Data candle belum cukup untuk menilai sumbu terakhir.';return;}const bias=f.direction==='POTENSI NAIK'?'NAIK ▲':f.direction==='POTENSI TURUN'?'TURUN ▼':'BELUM JELAS';const confidence=f.strength==='lebih mendukung'?'dukungan relatif kuat':f.strength==='sedang'?'dukungan sedang':'konfirmasi lemah';const horizons=[{id:'wick2m',sub:'wick2mSub',label:'reaksi sangat pendek',factor:0},{id:'wick5m',sub:'wick5mSub',label:'sekitar satu candle 5M',factor:1},{id:'wick15m',sub:'wick15mSub',label:'bias lanjutan',factor:2}];horizons.forEach((h,i)=>{const agree=i===0?false:i===1?(f.direction!=='BELUM JELAS'):((f.bull>=4||f.bear>=4)&&f.direction!=='BELUM JELAS');const value=agree?bias:'BELUM JELAS';const el=$('#'+h.id);if(el){el.textContent=value;el.style.color=value.startsWith('NAIK')?'#19d59a':value.startsWith('TURUN')?'#ff657a':'#f4c15d';}const sub=$('#'+h.sub);if(sub)sub.textContent=i===0?'tidak dapat dipastikan dari candle 5M saja':i===1?confidence:(agree?'bias jika momentum bertahan':'perlu konfirmasi baru');});$('#wickForecastDetail').textContent=`Candle tertutup terakhir: ${f.summary}. Sumbu atas ${(f.upper*100).toFixed(0)}% rentang, sumbu bawah ${(f.lower*100).toFixed(0)}% rentang. Estimasi 2 menit sangat tidak pasti karena candle 5M masih berjalan; tunggu konfirmasi harga live.`;}
+function renderWickForecast(){
+ const f=forecastFromLastWick();
+ const ids=[['wick2m','wick2mSub'],['wick5m','wick5mSub'],['wick15m','wick15mSub']];
+ if(!f){ids.forEach(([a,b])=>{if($('#'+a))$('#'+a).textContent='Menunggu data';if($('#'+b))$('#'+b).textContent='butuh candle 5M tertutup'});$('#wickForecastDetail').textContent='Data candle belum cukup untuk menilai sumbu terakhir.';return;}
+ // Show the dominant directional bias for each horizon. This is a directional estimate,
+ // not an entry instruction or a claim of certainty.
+ const clamp=n=>Math.max(0,Math.min(100,Math.round(n)));
+ const shortUp=(f.lower*1.25)+(f.upper*-.65)+((f.bull||0)*.025);
+ const shortDown=(f.upper*1.25)+(f.lower*-.65)+((f.bear||0)*.025);
+ const midUp=(f.bull||0)+Math.max(0,(f.lowerReject||0)-(f.upperReject||0))*.7;
+ const midDown=(f.bear||0)+Math.max(0,(f.upperReject||0)-(f.lowerReject||0))*.7;
+ const longUp=(f.bull||0)+(f.greenCount||0)*.55-(f.redCount||0)*.25;
+ const longDown=(f.bear||0)+(f.redCount||0)*.55-(f.greenCount||0)*.25;
+ const rows=[
+  {id:'wick2m',sub:'wick2mSub',up:shortUp,down:shortDown,desc:'arah dominan dari sumbu terakhir; sangat jangka pendek'},
+  {id:'wick5m',sub:'wick5mSub',up:midUp,down:midDown,desc:'gabungan 3 candle tertutup, penolakan, dan momentum'},
+  {id:'wick15m',sub:'wick15mSub',up:longUp,down:longDown,desc:'bias lanjutan dari pola 3 candle; bukan jaminan'}
+ ];
+ rows.forEach(r=>{
+  const isUp=r.up>=r.down;
+  const label=isUp?'NAIK ▲':'TURUN ▼';
+  const score=clamp(50+Math.abs(r.up-r.down)*12);
+  const el=$('#'+r.id);if(el){el.textContent=label;el.style.color=isUp?'#19d59a':'#ff657a';}
+  const sub=$('#'+r.sub);if(sub)sub.textContent=`dukungan relatif ${score}/100 · ${r.desc}`;
+ });
+ $('#wickForecastDetail').textContent=`Arah dominan dihitung dari 3 candle 5M yang sudah ditutup. ${f.summary}. Sumbu candle terakhir: atas ${(f.upper*100).toFixed(0)}%, bawah ${(f.lower*100).toFixed(0)}% dari rentang; penolakan bawah ${f.lowerReject}/3 candle, penolakan atas ${f.upperReject}/3. Angka dukungan adalah skor internal, bukan probabilitas menang. Forecast bukan instruksi entry; cek harga live dan risiko.`;
+}
 function intervalSec(){const t=normalizeTf(chartInterval);const seconds={'1m':60,'3m':180,'5m':300,'15m':900,'30m':1800,'1h':3600,'2h':7200,'4h':14400,'6h':21600,'12h':43200,'1d':86400,'1w':604800,'1M':2592000};return seconds[t]||900}
 let lastEntryNoticeKey='',entryNoticeTimer=0;
 function showEntryNotice(ts){if(!ts||!['BUY','SELL'].includes(ts.side))return;const key=`${symbol}:5m:${ts.decisionTime}:${ts.side}`;if(key===lastEntryNoticeKey)return;lastEntryNoticeKey=key;if(!['BUY','SELL'].includes(ts.side)||Number(ts.score)<60)return;const box=$('#entryNotice'),title=$('#entryNoticeTitle'),text=$('#entryNoticeText');if(!box||!title||!text)return;box.className='entry-notice show '+ts.side.toLowerCase();title.textContent=`WAKTU ENTRY · ${ts.side} ${ts.side==='BUY'?'▲':'▼'} · ${symbol} · 5M`;text.textContent=`Sinyal candle 5M selesai · setup score ${Math.round(ts.score)} · ${ts.reason||'cek chart dan risiko'}. ${wickForecastText()} Ini notifikasi saja—konfirmasi chart dan risiko sebelum entry manual.`;clearTimeout(entryNoticeTimer);entryNoticeTimer=setTimeout(()=>box.classList.remove('show'),12000);try{if(navigator.vibrate)navigator.vibrate([100,50,100])}catch{}log(`ENTRY ALERT ${ts.side} · ${symbol} · 5M · score ${Math.round(ts.score)} · manual only`)}
