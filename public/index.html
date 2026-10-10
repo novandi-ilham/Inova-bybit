@@ -370,7 +370,7 @@ function renderFinalSignal(){
  const dataText=($('#wickDataStatus')?.textContent||'BELUM DIKETAHUI').trim();
  const isLive=dataText.startsWith('LIVE'),isRecovery=dataText.startsWith('REST RECOVERY');
  // Recovery data may be useful for display but does not unlock a new entry until live streaming is healthy.
- const dataFresh=isLive;
+ const dataFresh=isLive||((isRecovery)&&Date.now()-lastRestSyncAt<10000&&Number.isFinite(livePrice)&&livePrice>0);
  const bias=a?.bias||'NEUTRAL',score=Number(a?.score||0);
  let forecastSide='';
  if(f){
@@ -382,12 +382,12 @@ function renderFinalSignal(){
  let signal='WAIT',why=[],checks=[];
  if(!a||!f){why.push('Data candle 5M belum cukup');checks.push('✕ Data candle 5M belum cukup untuk keputusan.');}
  else {
-  checks.push(`${dataFresh?'✓':'✕'} Koneksi: ${isLive?'LIVE — data streaming aktif':isRecovery?`REST RECOVERY — data pemulihan saja (${dataText.replace(/^REST RECOVERY\s*[·:-]?\s*/,'')}); tunggu LIVE`:`${dataText} — status LIVE belum terkonfirmasi`}`);
+  checks.push(`${dataFresh?'✓':'✕'} Koneksi: ${isLive?'LIVE — data streaming aktif':dataFresh?'REST RECOVERY — ticker/candle REST baru saja diperbarui':isRecovery?`REST RECOVERY — data pemulihan sudah usang (${dataText.replace(/^REST RECOVERY\s*[·:-]?\s*/,'')})`:`${dataText} — status LIVE belum terkonfirmasi`}`);
   checks.push(`${scoreOk?'✓':'✕'} Skor setup: ${Math.round(score)}/100 (minimum 60; kurang ${Math.max(0,60-Math.round(score))} poin)`);
   checks.push(`${aligned?'✓':'✕'} Arah: strategi ${bias} · forecast ${forecastSide||'belum tersedia'} (${aligned?'selaras':'belum selaras'})`);
   const reasons=Array.isArray(a.reasons)?a.reasons:[];
   if(reasons.length)checks.push(`Faktor yang perlu diperiksa: ${reasons.slice(0,4).join('; ')}`);
-  if(!dataFresh)why.push(isRecovery?'Koneksi masih REST recovery; tunggu status LIVE':'Status koneksi belum LIVE');
+  if(!dataFresh)why.push(isRecovery?'Data REST recovery sudah usang; tunggu pembaruan data':'Status koneksi belum LIVE atau REST belum segar');
   if(!scoreOk)why.push(`Skor ${Math.round(score)}/100, kurang ${Math.max(0,60-Math.round(score))} poin dari ambang 60`);
   if(!aligned)why.push(`Forecast ${forecastSide||'belum tersedia'} tidak selaras dengan bias ${bias}`);
   if(dataFresh&&scoreOk&&aligned&&['LONG','SHORT'].includes(bias))signal=bias==='LONG'?'BUY':'SELL';
