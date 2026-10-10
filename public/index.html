@@ -371,7 +371,9 @@ function renderFinalSignal(){
  const isLive=dataText.startsWith('LIVE'),isRecovery=dataText.startsWith('REST RECOVERY');
  // Recovery data may be useful for display but does not unlock a new entry until live streaming is healthy.
  const dataFresh=isLive||((isRecovery)&&Date.now()-lastRestSyncAt<10000&&Number.isFinite(livePrice)&&livePrice>0);
- const bias=a?.bias||'NEUTRAL',score=Number(a?.score||0);
+ // Use the same closed-candle scanner scorer for Final Signal so the score is comparable to the scanner.
+ const scoredSetup=closed5m.length>=35?scoreEarlyPair(entryCandles):null;
+ const bias=scoredSetup?.bias||a?.bias||'NEUTRAL',score=Number(scoredSetup?.score??a?.score??0);
  let forecastSide='';
  if(f){
   const up=(f.bull||0)+Math.max(0,(f.lowerReject||0)-(f.upperReject||0))*.7;
@@ -383,7 +385,7 @@ function renderFinalSignal(){
  if(!a||!f){why.push('Data candle 5M belum cukup');checks.push('✕ Data candle 5M belum cukup untuk keputusan.');}
  else {
   checks.push(`${dataFresh?'✓':'✕'} Koneksi: ${isLive?'LIVE — data streaming aktif':dataFresh?'REST RECOVERY — ticker/candle REST baru saja diperbarui':isRecovery?`REST RECOVERY — data pemulihan sudah usang (${dataText.replace(/^REST RECOVERY\s*[·:-]?\s*/,'')})`:`${dataText} — status LIVE belum terkonfirmasi`}`);
-  checks.push(`${scoreOk?'✓':'✕'} Skor setup: ${Math.round(score)}/100 (minimum 60; kurang ${Math.max(0,60-Math.round(score))} poin)`);
+  checks.push(`${scoreOk?'✓':'✕'} Skor setup 5M (rumus sama dengan scanner): ${Math.round(score)}/100 (minimum 60; kurang ${Math.max(0,60-Math.round(score))} poin)`);
   checks.push(`${aligned?'✓':'✕'} Arah: strategi ${bias} · forecast ${forecastSide||'belum tersedia'} (${aligned?'selaras':'belum selaras'})`);
   const reasons=Array.isArray(a.reasons)?a.reasons:[];
   if(reasons.length)checks.push(`Faktor yang perlu diperiksa: ${reasons.slice(0,4).join('; ')}`);
@@ -397,6 +399,7 @@ function renderFinalSignal(){
  $('#finalSignalBias').textContent=bias;
  $('#finalSignalBias').style.color=bias==='LONG'?'#19d59a':bias==='SHORT'?'#ff657a':'#f4b942';
  $('#finalSignalScore').textContent=`${Math.round(score)}/100`;
+ $('#finalSignalScore').title='Skor candle 5M tertutup menggunakan rumus yang sama dengan scanner; bukan jaminan profit.';
  $('#finalSignalConfirm').textContent=forecastSide?`${forecastSide} · ${aligned?'SELARAS':'BERLAWANAN'}`:'BELUM ADA';
  $('#finalSignalConfirm').style.color=aligned?'#19d59a':'#f4b942';
  reason.textContent=signal==='BUY'?'Semua filter utama lolos: koneksi LIVE, skor minimum terpenuhi, dan forecast 5M selaras. Tetap periksa SL/TP sebelum entry.':signal==='SELL'?'Semua filter utama lolos: koneksi LIVE, skor minimum terpenuhi, dan forecast 5M selaras. Tetap periksa SL/TP sebelum entry.':why.join(' · ')||'Menunggu konfirmasi 5M.';
