@@ -77,6 +77,7 @@ const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 let symbol='BTCUSDT',tf='15m',candles=[],entryCandles=[],chart,series,emaSeries,ws=null,drawings=[],tool='none',auto=false,paperPos=null,demoPositions=[],demoPnl=0,paperPnl=0,dailyPnl=0,lossStreak=0,pairLossStreak={},pairCooldownUntil={},killed=false,accountEquity=10000000,mode='paper',srActive=false,tradeStats={wins:0,losses:0},tradeHistory=[],hunterBusy=false,lastHunterCandle=0,lastHunterSymbol='',lastSwitchAt=0,positionPriceLines=[],tradeMarkers=[],symbolGeneration=0,marketClockOffset=0,rotateAwaySymbol='',rotateAwayUntil=0,manualPairSkipUntil={},demoHistory=[],demoSyncAt=0,demoLastClosedAt=0;
 // BYBIT-ONLY architecture: one exchange for market data, analysis and execution.
 const BYBIT_PUBLIC='https://api.bybit.com';
+const BYBIT_PUBLIC_FALLBACK='https://api.bytick.com';
 const BYBIT_WS='wss://stream.bybit.com/v5/public/linear';
 let marketSource='DIRECT';
 let marketProvider='BYBIT';
@@ -91,8 +92,8 @@ async function diagnoseMarketAccess(){
   return marketDiagnostic;
 }
 async function bybitPublic(path,params={}){
- const qs=new URLSearchParams(params).toString(); const direct=BYBIT_PUBLIC+path+(qs?'?'+qs:'');
- try{const r=await fetch(direct,{cache:'no-store',headers:{'Cache-Control':'no-cache','Pragma':'no-cache'}});if(r.ok){const d=await r.json();if(Number(d?.retCode)===0){marketSource='DIRECT';return d;}throw new Error(d?.retMsg||'Bybit API error');}if(r.status!==403&&r.status!==451)throw new Error(`Bybit ${r.status}`)}catch(e){marketDiagnostic.error=String(e?.message||e)}
+ const qs=new URLSearchParams(params).toString();
+ for(const host of [BYBIT_PUBLIC,BYBIT_PUBLIC_FALLBACK]){try{const ac=new AbortController(),timer=setTimeout(()=>ac.abort(),7000);let r;try{r=await fetch(host+path+(qs?'?'+qs:''),{cache:'no-store',signal:ac.signal,headers:{'Cache-Control':'no-cache','Pragma':'no-cache'}})}finally{clearTimeout(timer)}if(!r.ok)throw new Error(`Bybit ${r.status}`);const d=await r.json();if(Number(d?.retCode)!==0)throw new Error(d?.retMsg||'Bybit API error');marketSource=host===BYBIT_PUBLIC?'DIRECT':'DIRECT-FALLBACK';return d}catch(e){marketDiagnostic.error=String(e?.message||e);}}
  const proxyMap={'/v5/market/time':'/api/market/time','/v5/market/kline':'/api/market/klines','/v5/market/tickers':'/api/market/ticker','/v5/market/orderbook':'/api/market/orderbook','/v5/market/recent-trade':'/api/market/recent-trade','/v5/market/instruments-info':'/api/exchange-info'};const pp=proxyMap[path];if(!pp)throw new Error('Unsupported Bybit market proxy path: '+path);const r=await fetch(pp+'?'+new URLSearchParams({...params,_:Date.now()}),{cache:'no-store'});const d=await r.json().catch(()=>({}));if(!r.ok||d?.retCode!==undefined&&Number(d.retCode)!==0)throw new Error(d?.error||d?.retMsg||`Bybit proxy HTTP ${r.status}`);marketSource='SERVER-PROXY';return d;
 }
 let chartInterval='15';
