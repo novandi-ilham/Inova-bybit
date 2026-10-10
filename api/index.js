@@ -20,8 +20,9 @@ async function bybit(path,{method='GET',params={},body=null,signed=false}={}) {
   const q=method==='GET'?qsSorted(params):''; const bodyText=method==='GET'?'':JSON.stringify(body||{}); const ts=String(Date.now());
   const headers={'Content-Type':'application/json'};
   if(signed){if(!KEY||!SECRET)throw new Error('Bybit API credentials belum dikonfigurasi di server.');headers['X-BAPI-API-KEY']=KEY;headers['X-BAPI-TIMESTAMP']=ts;headers['X-BAPI-RECV-WINDOW']=RECV_WINDOW;headers['X-BAPI-SIGN']=sign(method==='GET'?q:bodyText,ts);headers['X-BAPI-SIGN-TYPE']='2';}
-  const url=BASE+path+(q?`?${q}`:''); const r=await fetch(url,{method,headers,body:method==='GET'?undefined:bodyText}); const text=await r.text(); let d;try{d=JSON.parse(text)}catch{d={raw:text}};
-  if(!r.ok||Number(d?.retCode)!==0)throw new Error(d?.retMsg||`Bybit HTTP ${r.status}`); return d;
+  const hosts=signed?[BASE]:[...new Set([BASE,'https://api.bytick.com'])]; let last;
+  for(const host of hosts){try{const ac=new AbortController(),timer=setTimeout(()=>ac.abort(),8000);let r;try{r=await fetch(host+path+(q?`?${q}`:''),{method,headers,body:method==='GET'?undefined:bodyText,signal:ac.signal,cache:'no-store'})}finally{clearTimeout(timer)}const text=await r.text();let d;try{d=JSON.parse(text)}catch{d={raw:text}}if(!r.ok||Number(d?.retCode)!==0)throw new Error(d?.retMsg||`Bybit HTTP ${r.status}`);return d}catch(e){last=e;console.error('Bybit host failed:',host,String(e?.message||e))}}
+  throw new Error(last?.message||'Bybit market unavailable');
 }
 async function readBody(req){if(req.body&&typeof req.body==='object')return req.body;return await new Promise((resolve,reject)=>{let raw='';req.on('data',c=>{raw+=c;if(raw.length>100000)reject(new Error('body too large'))});req.on('end',()=>{try{resolve(raw?JSON.parse(raw):{})}catch(e){reject(e)}});req.on('error',reject)})}
 function headers(res){res.setHeader('Cache-Control','no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, s-maxage=0');res.setHeader('Pragma','no-cache');res.setHeader('Expires','0');res.setHeader('Vary','*');res.setHeader('Access-Control-Allow-Origin','*');res.setHeader('Access-Control-Allow-Headers','Content-Type,X-Trading-Token');res.setHeader('Access-Control-Allow-Methods','GET,POST,OPTIONS');res.setHeader('Content-Type','application/json; charset=utf-8')}
