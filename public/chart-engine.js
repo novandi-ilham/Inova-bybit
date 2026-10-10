@@ -76,7 +76,23 @@ class CanvasChart {
     this.offset=n-(newStart+next);
     this.clamp();this.render();
   }
-  range(){const W=this.host.clientWidth,H=this.host.clientHeight,n=this.candles.length;const vis=Math.min(n,this.visible||110),end=n-this.offset,start=Math.max(0,end-vis),cs=this.candles.slice(start,end);let hi=Math.max(...cs.map(c=>c.high)),lo=Math.min(...cs.map(c=>c.low)); if(this.position){hi=Math.max(hi,+this.position.tp||hi,+this.position.entry||hi,+this.position.sl||hi);lo=Math.min(lo,+this.position.tp||lo,+this.position.entry||lo,+this.position.sl||lo)}const pad=(hi-lo)*.08||1;return {W,H,start,end,cs,hi:hi+pad,lo:lo-pad,vis}}
+  range(){
+    const W=this.host.clientWidth,H=this.host.clientHeight,n=this.candles.length;
+    const vis=Math.min(n,this.visible||110),end=n-this.offset,start=Math.max(0,end-vis),cs=this.candles.slice(start,end);
+    let hi=Math.max(...cs.map(c=>Number(c.high))),lo=Math.min(...cs.map(c=>Number(c.low)));
+    // Price scale is anchored to the visible candle range. A distant TP/SL/entry
+    // must never squash the candles into a thin band when a position is opened.
+    const span=Math.max(hi-lo,Math.abs(hi)*0.00001,1e-8),nearLo=lo-span*.35,nearHi=hi+span*.35;
+    if(this.position){
+      for(const raw of [this.position.entry,this.position.sl,this.position.tp]){
+        const v=Number(raw);
+        // Include position levels only when reasonably close to the visible market.
+        if(Number.isFinite(v)&&v>0&&v>=nearLo&&v<=nearHi){hi=Math.max(hi,v);lo=Math.min(lo,v)}
+      }
+    }
+    const pad=(hi-lo)*.08||Math.abs(hi)*.0001||1;
+    return {W,H,start,end,cs,hi:hi+pad,lo:lo-pad,vis};
+  }
   px(i,r){return 48+(i-r.start+.5)*(r.W-88)/r.vis}
   py(v,r){return 8+(r.hi-v)/(r.hi-r.lo)*(r.H-34)}
   line(x1,y1,x2,y2,stroke,w=1,dash=[]){const c=this.ctx;c.beginPath();c.setLineDash(dash);c.strokeStyle=stroke;c.lineWidth=w;c.moveTo(x1,y1);c.lineTo(x2,y2);c.stroke();c.setLineDash([])}
