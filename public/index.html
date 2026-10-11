@@ -752,25 +752,27 @@ async function scan(){
    // Scan across timeframes and automatically move the chart only when there is no open position.
    if(!active&&await scanCrossTimeframes(universe,active))return;
 
-   // Jangan pernah auto-close atau auto-entry. Pair boleh berpindah otomatis hanya saat TIDAK ada posisi.
+   // FLEXIBLE AUTO ENTRY: use the scanner's best early-momentum candidate; keep hard risk/SL safeguards.
    if(active){
     const holdPnl=mode==='paper'&&paperPos?currentPaperPnl(current?.c?.close||paperPos.entry):mode==='demo'&&currentDemoPosition()?demoPnlForPosition(currentDemoPosition()):0;
-    $('#scanState').textContent=`POSISI AKTIF · ${activeSymbol} · ${currentScore.toFixed(0)}% · ${fmtIDR(holdPnl)} · SCANNER PAUSE`;
-   }else if(best&&best.eligible&&best.symbol!==symbol&&best.rankScore>=48&&switchEdge>=HUNTER.switchAdvantage&&Date.now()-lastSwitchAt>=HUNTER.cooldownMs){
-    const target=best.symbol, targetBias=best.bias, targetScore=best.score, targetFresh=best.fresh;
-    await switchSymbol(target);
+    $('#scanState').textContent=`POSISI AKTIF · ${activeSymbol} · ${currentScore.toFixed(0)} · ${fmtIDR(holdPnl)}`;
+   }else if(best&&best.score>=38&&Date.now()-lastSwitchAt>=Math.min(HUNTER.cooldownMs,2500)){
+    const target=best.symbol, targetBias=best.bias, targetScore=best.score;
+    if(target!==symbol) await switchSymbol(target);
     const fresh=analyze();
-    // Only switch to a setup that is still early; never chase a move that stretched during loading.
-    if(fresh&&targetFresh&&Math.abs((fresh.c.close-fresh.e)/(fresh.A||1))<1.75){
-      $('#scanState').textContent=`EARLY PAIR ${target} · ${targetBias==='LONG'?'BUY':'SELL'} ${targetScore} · MANUAL`;
-      log(`EARLY MOMENTUM SWITCH → ${target} · ${targetBias==='LONG'?'BUY':'SELL'} · score ${targetScore} · anti-chase ON · MANUAL ONLY`);
-    }else{
-      $('#scanState').textContent=`WAIT SETUP · ${target} belum awal`;
-      log(`PAIR SWITCH DITAHAN · ${target} sudah tidak memenuhi filter early-entry`);
-    }
+    // Trust the same candle direction/momentum family used by the scanner; don't demand every indicator agree.
+    const directionOK=fresh&&((targetBias==='LONG'&&fresh.bias==='LONG'&&fresh.bull)||(targetBias==='SHORT'&&fresh.bias==='SHORT'&&fresh.bear));
+    if(fresh&&directionOK&&mode==='paper'){
+      const opened=openPaper(targetBias==='LONG'?'BUY':'SELL',fresh);
+      if(opened){$('#scanState').textContent=`AUTO ENTRY ${targetBias==='LONG'?'BUY':'SELL'} · ${target} · ${targetScore}`;log(`AUTO ENTRY PAPER → ${target} ${targetBias} · scanner score ${targetScore}`)}
+      else {$('#scanState').textContent=`ENTRY DITAHAN · ${target} · cek log`;}
+    }else if(fresh&&directionOK&&mode==='demo'){
+      const opened=await submitDemoAuto(targetBias==='LONG'?'BUY':'SELL',fresh);
+      $('#scanState').textContent=opened?`DEMO ENTRY ${targetBias} · ${target}`:`DEMO ENTRY GAGAL · ${target} · cek log`;
+    }else if(best){$('#scanState').textContent=`WAIT CANDLE · ${target} · ${targetBias} · ${targetScore}`;}
    }else if(best){
-    const ready=ranked.filter(x=>x.eligible).length;$('#scanState').textContent=ready?`${ready} SETUP AWAL · BEST ${best.symbol} ${best.score}`:`0 SETUP LAYAK · TOP ${best.symbol} ${best.score} · CEK ALASAN`;
-   }else {$('#scanState').textContent='DATA SCAN BELUM TERSEDIA';$('#scanCandidates').innerHTML='<div class="muted small">Tidak ada data kline valid. Cek koneksi Bybit/API.</div>';} 
+    const ready=ranked.filter(x=>x.eligible).length;$('#scanState').textContent=ready?`${ready} SETUP · BEST ${best.symbol} ${best.score}`:`CANDIDATE ${best.symbol} ${best.score} · MENUNGGU ARAH CANDLE`;
+   }else {$('#scanState').textContent='DATA SCAN BELUM TERSEDIA';$('#scanCandidates').innerHTML='<div class="muted small">Data kline tidak tersedia. Periksa koneksi Bybit/API.</div>';}
   }else{$('#scanState').textContent='BYBIT SCANNER READY · MANUAL TRADING'}
  }catch(e){log('Bybit scanner error: '+e.message);$('#scanState').textContent='BYBIT SCANNER ERROR'}finally{hunterBusy=false}
 }
