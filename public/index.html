@@ -421,9 +421,11 @@ function bbOscillatorReaction(cs){
  if(lowerBreak){bear+=1;bb='Close di bawah LOWER BAND → breakdown, waspadai pantulan';}
  if(rsiBull)bull++;if(rsiBear)bear++;if(macBull)bull++;if(macBear)bear++;if(stochBull)bull++;if(stochBear)bear++;
  const delta=bull-bear,direction=delta>=2?'LONG':delta<=-2?'SHORT':'NEUTRAL';
+ // Score is directional strength, not a signed score: strong SHORT must not display as a low score.
+ const confluenceScore=Math.min(100,Math.round(50+Math.abs(delta)*8));
  const fmt=x=>Number.isFinite(x)?x.toFixed(1):'—';
  const detail=`RSI ${fmt(r)} (${rsiBull?'bullish cross':rsiBear?'bearish cross':'netral'}) · MACD ${macBull?'menguat/BUY':macBear?'melemah/SELL':'netral'} · StochRSI K/D ${fmt(kv)}/${fmt(dv)} (${stochBull?'golden cross':stochBear?'dead cross':'netral'})`;
- return {ready:true,direction,score:Math.min(100,Math.round(50+delta*8)),delta,bull,bear,bb,detail,upper,mid,lower,rsi:r,macBull,macBear,stochBull,stochBear,lowerBounce,upperReject,upperBreak,lowerBreak};
+ return {ready:true,direction,score:confluenceScore,delta,bull,bear,bb,detail,upper,mid,lower,rsi:r,macBull,macBear,stochBull,stochBear,lowerBounce,upperReject,upperBreak,lowerBreak};
 }
 function renderFinalSignal(){
  const badge=$('#finalSignalBadge'),reason=$('#finalSignalReason');if(!badge||!reason)return;
@@ -445,20 +447,23 @@ function renderFinalSignal(){
   forecastSide=up>=down?'LONG':'SHORT';
  }
  const aligned=!!forecastSide&&forecastSide===bias,scoreOk=score>=48,setupReady=!!scoredSetup?.eligible&&['LONG','SHORT'].includes(bias),position=activeManagedPosition();
+ // Do not approve a new entry when BB/RSI/MACD/StochRSI give a clear opposite direction. Neutral oscillator is informational, not an automatic veto.
+ const oscConflict=osc.ready&&osc.direction!=='NEUTRAL'&&osc.direction!==bias;
  let signal='WAIT',why=[],checks=[];
  if(!a||!f){why.push('Data candle 5M belum cukup');checks.push('✕ Data candle 5M belum cukup untuk keputusan.');}
  else {
   checks.push(`${dataFresh?'✓':'✕'} Koneksi: ${isLive?'LIVE — data streaming aktif':dataFresh?'REST RECOVERY — ticker/candle REST baru saja diperbarui':isRecovery?`REST RECOVERY — data pemulihan sudah usang (${dataText.replace(/^REST RECOVERY\s*[·:-]?\s*/,'')})`:`${dataText} — status LIVE belum terkonfirmasi`}`);
   checks.push(`${scoreOk?'✓':'✕'} Skor setup 5M (rumus sama dengan scanner): ${Math.round(score)}/100 (minimum 48; kurang ${Math.max(0,48-Math.round(score))} poin)`);
   checks.push(`${aligned?'✓':'⚠'} Arah: strategi ${bias} · forecast ${forecastSide||'belum tersedia'} (${aligned?'selaras':'berlawanan/ belum tersedia'}; forecast hanya konfirmasi tambahan)`);
-  checks.push(`${!osc.ready?'…':osc.direction==='NEUTRAL'?'⚠':osc.direction===bias?'✓':'⚠'} BB + oscillator: ${osc.ready?`${osc.bb}; konfluensi ${osc.direction} (${osc.score}/100). ${osc.detail}`:osc.text}`);
+  checks.push(`${!osc.ready?'…':osc.direction==='NEUTRAL'?'⚠':osc.direction===bias?'✓':'✕'} BB + oscillator: ${osc.ready?`${osc.bb}; arah ${osc.direction}, kekuatan konfluensi ${osc.score}/100. ${osc.detail}`:osc.text}`);
   checks.push(`${setupReady?'✓':'✕'} Momentum awal: ${scoredSetup?.eligible?'setup awal lolos filter anti-chase':'belum lolos filter momentum/anti-chase'}`);
   const reasons=Array.isArray(a.reasons)?a.reasons:[];
   if(reasons.length)checks.push(`Faktor yang perlu diperiksa: ${reasons.slice(0,4).join('; ')}`);
   if(!dataFresh)why.push(isRecovery?'Data REST recovery sudah usang; tunggu pembaruan data':'Status koneksi belum LIVE atau REST belum segar');
   if(!scoreOk)why.push(`Skor ${Math.round(score)}/100, kurang ${Math.max(0,60-Math.round(score))} poin dari ambang 60`);
   if(!setupReady)why.push(scoredSetup?.reason||'Setup momentum awal belum memenuhi filter');
-  if(dataFresh&&scoreOk&&setupReady)signal=bias==='LONG'?'BUY':'SELL';
+  if(oscConflict)why.push(`Konfluensi BB + oscillator ${osc.direction} berlawanan dengan strategi ${bias}; tunggu arah selaras`);
+  if(dataFresh&&scoreOk&&setupReady&&!oscConflict)signal=bias==='LONG'?'BUY':'SELL';
  }
  badge.textContent=signal==='BUY'?(aligned?'BUY ▲ · LONG':'BUY ▲ · LONG · CEK RISIKO'):signal==='SELL'?(aligned?'SELL ▼ · SHORT':'SELL ▼ · SHORT · CEK RISIKO'):'WAIT · JANGAN ENTRY';
  badge.style.color=signal==='BUY'?'#19d59a':signal==='SELL'?'#ff657a':'#f4b942';
