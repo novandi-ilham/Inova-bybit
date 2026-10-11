@@ -33,7 +33,7 @@ function category(){return 'linear'}
 export default async function handler(req,res){
  headers(res);if(req.method==='OPTIONS')return res.status(204).end();
  try{
-  const path=new URL(req.url,'https://vercel.local').pathname;const url=new URL(req.url,'https://vercel.local');
+  const url=new URL(req.url,'https://vercel.local');const requestedRoute=url.searchParams.get('__route');const path=requestedRoute&&requestedRoute.startsWith('/api/')?requestedRoute:url.pathname;
   if(path==='/api/health'&&req.method==='GET')return res.status(200).json({ok:true,exchange:'BYBIT',category:'linear',mode:IS_DEMO?'bybit-demo':ALLOW_LIVE&&!IS_TESTNET?'live-enabled':'paper/testnet',testnet:IS_TESTNET,demo:IS_DEMO,maxRiskPct:MAX_RISK_PCT,maxNotionalUSDT:MAX_NOTIONAL_USDT,tradingEndpointLocked:IS_DEMO?!ALLOW_DEMO:(IS_TESTNET?!ALLOW_TESTNET:(!ALLOW_LIVE||!TRADING_TOKEN)),time:Date.now()});
   if(path==='/api/market/time'&&req.method==='GET')return res.status(200).json(await bybit('/v5/market/time'));
   if(path==='/api/market/ticker'&&req.method==='GET')return res.status(200).json(await bybit('/v5/market/tickers',{params:{category:category()}}));
