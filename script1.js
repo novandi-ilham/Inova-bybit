@@ -98,7 +98,7 @@ function analyzeData(cs){
  // Direction is score-led, with a small LONG preference. A SHORT must have clearly stronger evidence.
  const bias=long>=short-LONG_PREFERENCE_GAP&&long>0?'LONG':short>long+LONG_PREFERENCE_GAP?'SHORT':bull?'LONG':bear?'SHORT':'NEUTRAL';
  const reasons=[];
- if(regime==='EXTREME VOLATILITY')reasons.push('volatilitas ekstrem');
+ if(regime==='EXTREME VOLATILITY')reasons.push('volatilitas ekstrem — kurangi ukuran posisi, bukan otomatis menolak semua sinyal');
  if(Math.abs(momentum)<.20)reasons.push('momentum sangat lemah');
  if(vol<.65)reasons.push('volume relatif rendah');
  if(bias==='NEUTRAL')reasons.push('LONG/SHORT belum unggul');
@@ -107,12 +107,12 @@ function analyzeData(cs){
  if(bias==='SHORT'&&c.close>e)reasons.push('harga belum konfirmasi EMA20');
  // ACTIVE CANDLE MODE: score/confidence 60% is informational only.
  // Entry is driven primarily by the current 15M candle direction + real-time momentum.
- const longSetup=bull&&bodyPct>=0.30&&momentum>0.08&&!nearRes&&regime!=='EXTREME VOLATILITY';
- const shortSetup=bear&&bodyPct>=0.30&&momentum<-0.08&&!nearSup&&regime!=='EXTREME VOLATILITY';
- if(bias==='LONG'&&!longSetup)reasons.push('candle LONG belum cukup kuat');
- if(bias==='SHORT'&&!shortSetup)reasons.push('candle SHORT belum cukup kuat');
+ const longSetup=bull&&bodyPct>=0.20&&momentum>0.03&&!(nearRes&&rejectLong);
+ const shortSetup=bear&&bodyPct>=0.20&&momentum<-0.03&&!(nearSup&&rejectShort);
+ if(bias==='LONG'&&!longSetup)reasons.push('candle/momentum LONG belum memenuhi batas minimum fleksibel');
+ if(bias==='SHORT'&&!shortSetup)reasons.push('candle/momentum SHORT belum memenuhi batas minimum fleksibel');
  const shortApproved=shortSetup&&short>long+LONG_PREFERENCE_GAP;
- const allowed=regime!=='EXTREME VOLATILITY'&&((bias==='LONG'&&longSetup)||(bias==='SHORT'&&shortApproved));
+ const allowed=((bias==='LONG'&&longSetup)||(bias==='SHORT'&&shortApproved))&&Math.abs(momentum)>=0.03;
  const slDist=Math.max(A*.8,c.close*.004),rr=2,tpDist=slDist*rr;
  return {c,e,A,support,resistance,body,range,wU,wL,bodyPct,bull,bear,trend,momentum,vol,breakoutLong,breakoutShort,rejectLong,rejectShort,nearRes,nearSup,emaSlope,regime,longScore:long,shortScore:short,score,bias,reasons,allowed,slDist,tpDist,rr};
 }
