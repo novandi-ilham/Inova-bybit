@@ -471,8 +471,8 @@ function renderFinalSignal(){
  const dataFresh=isLive||((isRecovery)&&Date.now()-lastRestSyncAt<10000&&Number.isFinite(livePrice)&&livePrice>0);
  const osc=bbOscillatorReaction(closedActive);
  const bbEl=$('#bbReaction'),oscEl=$('#bbOscScore'),oscDetailEl=$('#bbOscDetail');if(bbEl){bbEl.textContent=osc.ready?osc.bb:'MENUNGGU DATA';bbEl.style.color=osc.ready&&osc.direction==='LONG'?'#19d59a':osc.ready&&osc.direction==='SHORT'?'#ff657a':'#f4b942';}if(oscEl){oscEl.textContent=osc.ready?`${osc.direction} · ${osc.score}/100`:'—';oscEl.style.color=osc.ready&&osc.direction==='LONG'?'#19d59a':osc.ready&&osc.direction==='SHORT'?'#ff657a':'#f4b942';}if(oscDetailEl)oscDetailEl.textContent=osc.ready?osc.detail:osc.text;
- // Use the same closed-candle scanner scorer for Final Signal so the score is comparable to the scanner.
- const scoredSetup=closedActive.length>=35?scoreEarlyPair(activeCandles):null;
+ // Score the forming candle for early momentum; use the same scorer as the scanner to keep direction consistent.
+ const scoredSetup=activeCandles.length>=35?scoreEarlyPair(earlyCandles):null;
  const bias=scoredSetup?.bias||a?.bias||'NEUTRAL',score=Number(scoredSetup?.score??a?.score??0);
  let forecastSide='';
  if(f){
@@ -480,10 +480,10 @@ function renderFinalSignal(){
   const down=(f.bear||0)+Math.max(0,(f.upperReject||0)-(f.lowerReject||0))*.7;
   forecastSide=up>=down?'LONG':'SHORT';
  }
- const aligned=!!forecastSide&&forecastSide===bias,scoreOk=score>=42,setupReady=!!scoredSetup?.eligible&&['LONG','SHORT'].includes(bias),position=activeManagedPosition();
+ const aligned=!!forecastSide&&forecastSide===bias,scoreOk=score>=38,setupReady=!!scoredSetup&&scoredSetup.score>=38&&scoredSetup.fresh&&scoredSetup.extension<=1.5&&['LONG','SHORT'].includes(bias),position=activeManagedPosition();
  // Persistent early-warning card: reacts before candle close, respects active timeframe, and is explicitly not an entry command.
  let earlyCard=$('#earlyMomentumCard');if(!earlyCard){earlyCard=document.createElement('div');earlyCard.id='earlyMomentumCard';earlyCard.className='metric';earlyCard.style.cssText='margin:8px 0;border:1px solid #334155;padding:10px;border-radius:8px';const anchor=$('#finalSignalReason');if(anchor)anchor.insertAdjacentElement('afterend',earlyCard);}
- if(earlyCard){const etf=(TF_LABEL&&TF_LABEL[normalizeTf(chartInterval)])||normalizeTf(chartInterval).toUpperCase();const eok=!!(dataFresh&&earlySetup&&earlySetup.score>=42&&earlySetup.fresh&&earlySetup.extension<=1.5&&['LONG','SHORT'].includes(earlySetup.bias));earlyCard.innerHTML=eok?`<b style="color:${earlySetup.bias==='LONG'?'#19d59a':'#ff657a'}">EARLY WARNING · ${earlySetup.bias==='LONG'?'BUY / LONG':'SELL / SHORT'} · ${etf} · ${earlySetup.score}/100</b><div class="small muted" style="margin-top:4px">Momentum mulai terdeteksi pada candle yang masih berjalan. EMA20 distance ${earlySetup.extension.toFixed(2)} ATR · volume x${Number(earlySetup.volRatio||0).toFixed(2)}. Tunggu konfirmasi; ini peringatan awal, bukan perintah entry.</div>`:`<b style="color:#f4b942">EARLY WARNING · BELUM ADA PEMICU ${etf}</b><div class="small muted" style="margin-top:4px">${!dataFresh?'Data live belum segar.':earlySetup?.reason||'Menunggu momentum awal dan anti-chase.'} Sinyal final tetap memakai candle tertutup.</div>`;}
+ if(earlyCard){const etf=(TF_LABEL&&TF_LABEL[normalizeTf(chartInterval)])||normalizeTf(chartInterval).toUpperCase();const eok=!!(dataFresh&&earlySetup&&earlySetup.score>=38&&earlySetup.fresh&&earlySetup.extension<=1.5&&['LONG','SHORT'].includes(earlySetup.bias));earlyCard.innerHTML=eok?`<b style="color:${earlySetup.bias==='LONG'?'#19d59a':'#ff657a'}">EARLY WARNING · ${earlySetup.bias==='LONG'?'BUY / LONG':'SELL / SHORT'} · ${etf} · ${earlySetup.score}/100</b><div class="small muted" style="margin-top:4px">Momentum mulai terdeteksi pada candle yang masih berjalan. EMA20 distance ${earlySetup.extension.toFixed(2)} ATR · volume x${Number(earlySetup.volRatio||0).toFixed(2)}. Tunggu konfirmasi; ini peringatan awal, bukan perintah entry.</div>`:`<b style="color:#f4b942">EARLY WARNING · BELUM ADA PEMICU ${etf}</b><div class="small muted" style="margin-top:4px">${!dataFresh?'Data live belum segar.':earlySetup?.reason||'Menunggu momentum awal dan anti-chase.'} Sinyal final tetap memakai candle tertutup.</div>`;}
  let signal='WAIT',why=[],checks=[];
  if(!a||!f){why.push(`Data candle ${tfLabel} belum cukup`);checks.push(`✕ Data candle ${tfLabel} belum cukup untuk keputusan.`);}
  else {
@@ -684,8 +684,9 @@ function currentPaperPnl(price){if(!hasValidPaperPosition())return 0;const p=pap
 function paperNetTargetIDR(p){return Math.abs(Number(p?.entry||0)*Number(p?.qty||0))*IDR*PAPER_NET_TARGET_PCT/100}
 function paperMaxRiskIDR(p){return Math.abs(Number(p?.entry||0)*Number(p?.qty||0))*IDR*PAPER_MAX_RISK_PCT/100}
 function scoreEarlyPair(cs){
- // Scanner uses only CLOSED candles from the selected chart timeframe. Return weak candidates too, so UI can explain why they are not ready.
- const closed=Array.isArray(cs)?cs.slice(0,-1):[];
+ // EARLY-MOMENTUM FIX: include the currently forming candle supplied by the live ticker/kline.
+ // Its close is refreshed from the latest price before scoring, so entry can trigger near momentum start, not one candle late.
+ const closed=Array.isArray(cs)?cs:[];
  if(closed.length<35)return {eligible:false,score:0,bias:'NEUTRAL',reason:'Data candle belum cukup'};
  const a=analyzeData(closed);if(!a||!Number.isFinite(a.A)||a.A<=0)return {eligible:false,score:0,bias:'NEUTRAL',reason:'Indikator belum siap'};
  const c=closed.at(-1),prev=closed.at(-2),p3=closed.at(-4),cl=closed.map(x=>x.close),es=ema(cl,20),e=es.at(-1),ePrev=es.at(-4),A=a.A;
@@ -756,7 +757,7 @@ async function scan(){
    if(active){
     const holdPnl=mode==='paper'&&paperPos?currentPaperPnl(current?.c?.close||paperPos.entry):mode==='demo'&&currentDemoPosition()?demoPnlForPosition(currentDemoPosition()):0;
     $('#scanState').textContent=`POSISI AKTIF · ${activeSymbol} · ${currentScore.toFixed(0)} · ${fmtIDR(holdPnl)}`;
-   }else if(best&&best.score>=38&&Date.now()-lastSwitchAt>=Math.min(HUNTER.cooldownMs,2500)){
+   }else if(best&&best.score>=38&&best.fresh&&best.extension<=1.5&&Date.now()-lastSwitchAt>=Math.min(HUNTER.cooldownMs,2500)){
     const target=best.symbol, targetBias=best.bias, targetScore=best.score;
     if(target!==symbol) await switchSymbol(target);
     const fresh=analyze();
