@@ -519,7 +519,7 @@ function renderFinalSignal(){
 function runAutoPaperTrade(){
  const btn=$('#tradeModeToggle'),help=$('#tradeModeHelp');
  if(btn){btn.textContent=autoTradeMode==='auto'?'AUTO TRADE: ON · PAPER':'AUTO TRADE: OFF · MANUAL';btn.classList.toggle('active',autoTradeMode==='auto');btn.classList.toggle('buy',autoTradeMode==='auto');}
- if(help)help.textContent=autoTradeMode==='auto'?'AUTO PAPER aktif: entry hanya dari Final Signal BUY/SELL, data LIVE, candle tertutup, risk guard, dan tanpa posisi aktif. SL/TP tetap terpasang.':'Manual entry aktif. Auto entry hanya tersedia pada PAPER; tidak mengirim order sungguhan.';
+ if(help)help.textContent=autoTradeMode==='auto'?'AUTO PAPER aktif: scanner memakai ticker live + candle berjalan, momentum awal dan anti-chase, hanya satu posisi, serta batas risiko/profit guard.':'Manual entry aktif. Auto entry hanya tersedia pada PAPER; tidak mengirim order sungguhan.';
  if(autoTradeMode!=='auto'||mode!=='paper'||killed||autoEntryBusy||hasValidPaperPosition())return;
  const badge=String($('#finalSignalBadge')?.textContent||'').toUpperCase();
  const side=badge.startsWith('BUY')?'BUY':badge.startsWith('SELL')?'SELL':'';
@@ -712,18 +712,22 @@ function scoreEarlyPair(cs){
  // Fresh continuation and pullback entries are both candidates; reject late extensions.
  const directionalCandle=bias==='LONG'?(c.close>c.open&&recent>0):(c.close<c.open&&recent<0);
  const pullbackTurn=bias==='LONG'?(lower>upper*1.15&&c.close>prev.close):(upper>lower*1.15&&c.close<prev.close);
- const fresh=(crossUp||crossDown||Math.abs(recent)<1.55||directionalCandle||pullbackTurn)&&extension<1.5;
+ // Entry timing: do not let a strong directional candle excuse a late extension.
+ // Prefer fresh EMA crosses, compact momentum, or a pullback-turn near EMA20.
+ const fresh=(crossUp||crossDown||Math.abs(recent)<1.0||pullbackTurn)&&extension<1.05;
+ const rejectionAgainst=(bias==='LONG'&&upper>.42&&upper>lower*1.25)||(bias==='SHORT'&&lower>.42&&lower>upper*1.25);
  const reasons=[];
- if(extension>1.5)reasons.push('anti-chase: harga terlalu jauh dari EMA20');
+ if(extension>=1.05)reasons.push('anti-chase: harga sudah menjauh dari EMA20');
+ if(rejectionAgainst)reasons.push('wick rejection berlawanan dengan entry');
  if(a.regime==='EXTREME VOLATILITY')reasons.push('volatilitas ekstrem');
  if(volRatio<.55)reasons.push('volume relatif rendah — konfirmasi lebih lemah');
  if(score<42)reasons.push('skor kandidat di bawah 42');
- if(!fresh)reasons.push('momentum sudah terlambat atau belum fresh');
+ if(!fresh)reasons.push('momentum belum fresh atau entry terlambat');
  if(oscConflict)reasons.push(`BB/oscillator kuat berlawanan (${osc.direction})`);
  if(bias==='LONG'&&upper>.58)reasons.push('sumbu atas besar — risiko rejection');
  if(bias==='SHORT'&&lower>.58)reasons.push('sumbu bawah besar — risiko pantulan');
  const directionalOk=directionalCandle||pullbackTurn||(bias==='LONG'?recent>0:recent<0)||crossUp||crossDown;
- const eligible=score>=42&&extension<=1.5&&a.regime!=='EXTREME VOLATILITY'&&fresh&&directionalOk&&!oscConflict;
+ const eligible=score>=42&&extension<1.05&&a.regime!=='EXTREME VOLATILITY'&&fresh&&directionalOk&&!oscConflict&&!rejectionAgainst;
  return {score,bias,analysis:a,earlyScore:score,extension,fresh,eligible,oscDirection:osc.direction,oscAligned,oscConflict,reason:eligible?'KANDIDAT AWAL · momentum + BB/oscillator diperiksa':reasons.slice(0,2).join(' · ')||'menunggu konfirmasi',closedTime:c.time,change:0,volume:0,upper,lower,volRatio};
 }
 async function scan(){
@@ -740,9 +744,13 @@ async function scan(){
   $('#leaders').innerHTML='<div class="muted">Top Gainers</div>'+gainers.map(x=>`<div class="kv"><span>${x.symbol}</span><b class="up">+${(Number(x.price24hPcnt)*100).toFixed(2)}%</b></div>`).join('')+'<div class="muted" style="margin-top:8px">Top Losers</div>'+losers.map(x=>`<div class="kv"><span>${x.symbol}</span><b class="down">${(Number(x.price24hPcnt)*100).toFixed(2)}%</b></div>`).join('');
 
   // SCANNER SAJA: tidak pernah membuka/menutup order. Trading sepenuhnya manual.
-  if(auto&&!killed&&(mode==='paper'||mode==='demo')&&Date.now()-lastSwitchAt>=HUNTER.cooldownMs){
+  if(auto&&!killed&&mode==='paper'&&!hasValidPaperPosition()&&Date.now()-lastSwitchAt>=HUNTER.cooldownMs){
    // Bounded concurrency protects Bybit rate limits while scanning the highest-liquidity and momentum pairs quickly.
-   const results=Array(universe.length);let scanIndex=0;const worker=async()=>{while(scanIndex<universe.length){const i=scanIndex++,x=universe[i];try{const kd=(await getScannerKlines(x.symbol)).slice().reverse();const cs=kd.map(k=>({time:Math.floor(Number(k[0])/1000),open:+k[1],high:+k[2],low:+k[3],close:+k[4],volume:+k[5]}));const scored=scoreEarlyPair(cs);if(scored)results[i]={symbol:x.symbol,...scored,change:Number(x.price24hPcnt)*100,volume:Number(x.turnover24h)};}catch{results[i]=null;}}};await Promise.all(Array.from({length:Math.min(7,universe.length)},worker));
+   const results=Array(universe.length);let scanIndex=0;const worker=async()=>{while(scanIndex<universe.length){const i=scanIndex++,x=universe[i];try{const kd=(await getScannerKlines(x.symbol)).slice().reverse();const cs=kd.map(k=>({time:Math.floor(Number(k[0])/1000),open:+k[1],high:+k[2],low:+k[3],close:+k[4],volume:+k[5]}));
+ // Refresh the current forming candle from the live ticker before scoring. This makes the
+ // candidate reflect current momentum rather than a stale cached kline or 24h leaderboard.
+ const tickerPrice=Number(x.lastPrice);if(cs.length&&tickerPrice>0){const live=cs[cs.length-1];live.close=tickerPrice;live.high=Math.max(live.high,tickerPrice);live.low=Math.min(live.low,tickerPrice);}
+ const scored=scoreEarlyPair(cs);if(scored)results[i]={symbol:x.symbol,...scored,change:Number(x.price24hPcnt)*100,volume:Number(x.turnover24h)};}catch{results[i]=null;}}};await Promise.all(Array.from({length:Math.min(7,universe.length)},worker));
    const ranked=results.filter(x=>x&&!isPairLossBlocked(x.symbol)&&!(x.symbol===rotateAwaySymbol&&Date.now()<rotateAwayUntil)&&Number(manualPairSkipUntil[x.symbol]||0)<=Date.now()).map(x=>({...x,rankScore:x.score+(x.fresh?8:0)+(x.oscAligned?5:0)-(x.oscConflict?12:0)-(x.extension>1.2?8:0)+Math.min(4,Math.log10(Math.max(1,x.volume||1))-5)})).sort((a,b)=>(Number(b.eligible)-Number(a.eligible))||b.rankScore-a.rankScore),best=ranked.find(x=>x.eligible)||ranked[0],currentCandidate=ranked.find(x=>x.symbol===symbol),switchEdge=best?best.rankScore-(currentCandidate?.rankScore||0):0;
   const top=ranked.slice(0,6);$('#scanCandidates').innerHTML=top.length?top.map((x,i)=>`<div class="scan-candidate" data-candidate="${x.symbol}"><div><b>${i+1}. ${x.symbol} · ${x.bias==='LONG'?'BUY/LONG':'SELL/SHORT'}</b><div class="rank">${x.eligible?'SETUP AWAL LAYAK':'BELUM SIAP'} · ${(TF_LABEL&&TF_LABEL[normalizeTf(chartInterval)])||normalizeTf(chartInterval)}</div></div><b class="score" style="color:${x.eligible?'#19d59a':'#f4c15d'}">${x.score}/100</b><div class="meta">${x.reason||'menunggu konfirmasi'} · BB/OSC ${x.oscDirection||'—'} · EMA20 ${x.extension.toFixed(2)} ATR · volume x${Number(x.volRatio||0).toFixed(2)}</div></div>`).join(''):'<div class="muted small">Data scanner belum tersedia. Coba Refresh.</div>';$$('[data-candidate]').forEach(e=>e.onclick=()=>switchSymbol(e.dataset.candidate));
    const active=mode==='paper'?hasValidPaperPosition():(mode==='demo'?hasValidDemoPosition():false);
@@ -761,8 +769,12 @@ async function scan(){
     const target=best.symbol, targetBias=best.bias, targetScore=best.score;
     if(target!==symbol) await switchSymbol(target);
     const fresh=analyze();
-    // Trust the same candle direction/momentum family used by the scanner; don't demand every indicator agree.
-    const directionOK=fresh&&((targetBias==='LONG'&&fresh.bias==='LONG'&&fresh.bull)||(targetBias==='SHORT'&&fresh.bias==='SHORT'&&fresh.bear));
+    // Re-score the newly selected pair using the refreshed chart candles and live ticker.
+    // If momentum already reversed during pair switching, skip this entry instead of chasing.
+    const liveCs=(Array.isArray(entryCandles)&&entryCandles.length>=35?entryCandles:candles).map(k=>({...k}));
+    if(liveCs.length&&Number(livePrice)>0){const lc=liveCs[liveCs.length-1];lc.close=Number(livePrice);lc.high=Math.max(Number(lc.high)||Number(livePrice),Number(livePrice));lc.low=Math.min(Number(lc.low)||Number(livePrice),Number(livePrice));}
+    const liveCandidate=liveCs.length>=35?scoreEarlyPair(liveCs):null;
+    const directionOK=fresh&&liveCandidate?.eligible&&liveCandidate.bias===targetBias&&((targetBias==='LONG'&&Number(livePrice)>=Number(liveCs.at(-1).open))||(targetBias==='SHORT'&&Number(livePrice)<=Number(liveCs.at(-1).open)))&&Date.now()-Number(lastWsTickerAt||0)<12000;
     if(fresh&&directionOK&&mode==='paper'){
       const opened=openPaper(targetBias==='LONG'?'BUY':'SELL',fresh);
       if(opened){$('#scanState').textContent=`AUTO ENTRY ${targetBias==='LONG'?'BUY':'SELL'} · ${target} · ${targetScore}`;log(`AUTO ENTRY PAPER → ${target} ${targetBias} · scanner score ${targetScore}`)}
