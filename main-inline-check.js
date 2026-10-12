@@ -1,0 +1,1021 @@
+
+let deferredInstallPrompt=null;
+window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredInstallPrompt=e;const b=document.getElementById('installBtn');if(b)b.style.display='inline-block'});
+window.addEventListener('appinstalled',()=>{deferredInstallPrompt=null;const b=document.getElementById('installBtn');if(b)b.style.display='none'});
+document.addEventListener('click',async e=>{if(e.target?.id==='installBtn'&&deferredInstallPrompt){deferredInstallPrompt.prompt();await deferredInstallPrompt.userChoice;deferredInstallPrompt=null;e.target.style.display='none'}});
+if('serviceWorker' in navigator){window.addEventListener('load',()=>navigator.serviceWorker.register('/sw.js').catch(()=>{}))}
+const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+let symbol='BTCUSDT',tf='15m',candles=[],entryCandles=[],chart,series,emaSeries,ws=null,drawings=[],tool='none',auto=false,autoTradeMode='manual',autoEntryLastKey='',autoEntryBusy=false,paperPos=null,demoPositions=[],demoPnl=0,paperPnl=0,dailyPnl=0,lossStreak=0,pairLossStreak={},pairCooldownUntil={},killed=false,accountEquity=10000000,mode='paper',srActive=false,tradeStats={wins:0,losses:0},tradeHistory=[],hunterBusy=false,lastHunterCandle=0,lastHunterSymbol='',lastSwitchAt=0,positionPriceLines=[],tradeMarkers=[],symbolGeneration=0,marketClockOffset=0,rotateAwaySymbol='',rotateAwayUntil=0,manualPairSkipUntil={},demoHistory=[],demoSyncAt=0,demoLastClosedAt=0;
+// BYBIT-ONLY architecture: one exchange for market data, analysis and execution.
+const BYBIT_PUBLIC='https://api.bybit.id';
+const BYBIT_PUBLIC_FALLBACK='https://api.bybit.com';
+const BYBIT_WS='wss://stream.bybit.id/v5/public/linear';
+let marketSource='DIRECT';
+let marketProvider='BYBIT';
+let marketDiagnostic={direct:'NOT_TESTED',proxy:'NOT_TESTED',directStatus:null,proxyStatus:null,error:''};
+async function diagnoseMarketAccess(){
+  marketDiagnostic={direct:'TESTING',proxy:'TESTING',directStatus:null,proxyStatus:null,error:''};
+  const u=BYBIT_PUBLIC+'/v5/market/time?_diag='+Date.now();
+  try{const ac=new AbortController();const timer=setTimeout(()=>ac.abort(),7000);const r=await fetch(u,{cache:'no-store',signal:ac.signal});clearTimeout(timer);marketDiagnostic.directStatus=r.status;if(r.ok){const d=await r.json();if(Number(d?.retCode)===0){marketDiagnostic.direct='OK';log('Market diagnostic · DIRECT Bybit OK');}else marketDiagnostic.direct='API ERROR';}else{marketDiagnostic.direct='HTTP '+r.status;log('Market diagnostic · DIRECT Bybit HTTP '+r.status);}}catch(e){marketDiagnostic.direct='ERROR';marketDiagnostic.error=String(e?.name||e?.message||e);log('Market diagnostic · DIRECT Bybit error: '+marketDiagnostic.error)}
+  try{const r=await fetch('/api/market/diagnostic?_diag='+Date.now(),{cache:'no-store'});marketDiagnostic.proxyStatus=r.status;const d=await r.clone().json().catch(()=>({}));if(r.ok&&d.ok&&d.checks&&d.checks.time&&d.checks.ticker&&d.checks.kline)marketDiagnostic.proxy='OK · TIME/TICKER/KLINE';else if(d?.errors)marketDiagnostic.proxy='DATA CHECK FAILED';else marketDiagnostic.proxy='HTTP '+r.status;log('Market diagnostic · SERVER proxy '+marketDiagnostic.proxy);}catch(e){marketDiagnostic.proxy='ERROR';log('Market diagnostic · SERVER proxy error: '+String(e?.message||e))}
+  marketSource=marketDiagnostic.direct==='OK'?'DIRECT':marketDiagnostic.proxy==='OK'?'SERVER-PROXY':'UNAVAILABLE';
+  $('#conn').textContent='BYBIT MARKET · DIRECT='+marketDiagnostic.direct+' · PROXY='+marketDiagnostic.proxy;
+  return marketDiagnostic;
+}
+async function bybitPublic(path,params={}){
+ const qs=new URLSearchParams(params).toString();
+ const proxyMap={'/v5/market/time':'/api/market/time','/v5/market/kline':'/api/market/klines','/v5/market/tickers':'/api/market/ticker','/v5/market/orderbook':'/api/market/orderbook','/v5/market/recent-trade':'/api/market/recent-trade','/v5/market/instruments-info':'/api/exchange-info'};
+ const pp=proxyMap[path];
+ // Prefer the same-origin Vercel function first. This avoids browser CORS/network
+ // restrictions that can leave the chart permanently waiting for its first candles.
+ if(pp){
+  try{
+   const proxyParams={...params,_:Date.now()};
+   const ac=new AbortController(),timer=setTimeout(()=>ac.abort(),10000);
+   let r;try{r=await fetch(pp+'?'+new URLSearchParams(proxyParams),{cache:'no-store',signal:ac.signal,headers:{'Cache-Control':'no-cache'}})}finally{clearTimeout(timer)}
+   const d=await r.json().catch(()=>({}));
+   if(r.ok && Number(d?.retCode)===0){marketSource='SERVER-PROXY';return d;}
+   marketDiagnostic.error=String(d?.error||d?.retMsg||`Bybit proxy HTTP ${r.status}`);
+   // A structured upstream 403 is not a browser-CORS issue. Avoid immediately
+   // duplicating the same request from the handset to both Bybit hostnames.
+   if(r.status===502 && (d?.upstreamStatus===403 || /Bybit upstream HTTP 403/.test(marketDiagnostic.error))) throw new Error(marketDiagnostic.error+' · periksa akses IP/wilayah atau tunggu jika terkena rate limit');
+  }catch(e){marketDiagnostic.error=String(e?.name||e?.message||e);if(/Bybit upstream HTTP 403/.test(marketDiagnostic.error))throw e;}
+ }
+ let lastError='Bybit market unavailable';
+ for(const host of [BYBIT_PUBLIC,BYBIT_PUBLIC_FALLBACK]){
+  try{
+   const ac=new AbortController(),timer=setTimeout(()=>ac.abort(),7000);let r;
+   try{r=await fetch(host+path+(qs?'?'+qs:''),{cache:'no-store',signal:ac.signal,headers:{'Cache-Control':'no-cache','Pragma':'no-cache'}})}finally{clearTimeout(timer)}
+   if(!r.ok)throw new Error(`Bybit HTTP ${r.status}`);
+   const d=await r.json();if(Number(d?.retCode)!==0)throw new Error(d?.retMsg||'Bybit API error');
+   marketSource=host===BYBIT_PUBLIC?'DIRECT':'DIRECT-FALLBACK';return d;
+  }catch(e){lastError=String(e?.message||e);marketDiagnostic.error=lastError;}
+ }
+ throw new Error(lastError||marketDiagnostic.error||'Bybit market unavailable');
+}
+let chartInterval='15';
+const TF_API={'1m':'1','3m':'3','5m':'5','15m':'15','30m':'30','1h':'60','2h':'120','4h':'240','6h':'360','12h':'720','1d':'D','1w':'W','1M':'M'};
+const TF_LABEL={'1m':'1m','3m':'3m','5m':'5m','15m':'15m','30m':'30m','1h':'1H','2h':'2H','4h':'4H','6h':'6H','12h':'12H','1d':'1D','1w':'1W','1M':'1M'};
+function normalizeTf(v){const raw=String(v||'15m').trim();const byApi={'1':'1m','3':'3m','5':'5m','15':'15m','30':'30m','60':'1h','120':'2h','240':'4h','360':'6h','720':'12h','D':'1d','W':'1w','M':'1M'};return TF_API[raw]?raw:(byApi[raw]||'15m')}
+function tfApi(v=chartInterval){const n=normalizeTf(v);return TF_API[n]||'15'}
+async function fetchBybitKlines(symbolName,limit=150,interval=chartInterval){const d=await bybitPublic('/v5/market/kline',{category:'linear',symbol:String(symbolName).toUpperCase(),interval:tfApi(interval),limit:String(limit)});const list=d?.result?.list;if(!Array.isArray(list)||!list.length)throw new Error(d?.retMsg||d?.error||`Bybit kline kosong (${symbolName} · interval ${tfApi(interval)} · source ${marketSource})`);return list.slice().reverse().map(k=>({time:Math.floor(Number(k[0])/1000),open:+k[1],high:+k[2],low:+k[3],close:+k[4],volume:+k[5]})).filter(x=>[x.time,x.open,x.high,x.low,x.close,x.volume].every(Number.isFinite));}
+async function fetchMarketKlines(symbolName,limit=150,interval=chartInterval){const out=await fetchBybitKlines(symbolName,limit,interval);marketProvider='BYBIT';return out;}
+async function nowMarketMs(){return Date.now()+marketClockOffset;}
+async function syncMarketClock(){try{const d=await bybitPublic('/v5/market/time');const sec=Number(d?.result?.timeSecond);if(Number.isFinite(sec))marketClockOffset=sec*1000-Date.now();}catch{}}
+const DEFAULT_PAPER_MARGIN_IDR=500000; const DEFAULT_LEVERAGE=10;
+const HUNTER={minConfidence:0,switchAdvantage:8,scanMs:7000,candidateCount:28,cooldownMs:10000};
+const PAIR_LOSS_COOLDOWN_MS=30*60*1000;
+const HARD_RISK_PCT=0.20;
+const LONG_PREFERENCE_GAP=6;
+const scannerKlineCache=new Map();
+let autoTimeframe=true,lastMultiTfScanAt=0,lastTfSwitchAt=0,multiTfBusy=false;
+async function getScannerKlines(sym,interval=chartInterval){const tf=normalizeTf(interval),cacheKey=tf+':'+sym;const hit=scannerKlineCache.get(cacheKey);if(hit&&Date.now()-hit.at<6500)return hit.data;const d=await bybitPublic('/v5/market/kline',{category:'linear',symbol:sym,interval:tfApi(tf),limit:'80'});const data=d?.result?.list||[];if(!data.length)throw new Error('Bybit kline kosong');scannerKlineCache.set(cacheKey,{at:Date.now(),data});return data;}
+async function scanCrossTimeframes(universe,activePosition){
+ if(!autoTimeframe||!auto||killed||activePosition||multiTfBusy||Date.now()-lastMultiTfScanAt<14000||Date.now()-lastTfSwitchAt<18000)return false;
+ multiTfBusy=true;lastMultiTfScanAt=Date.now();
+ try{
+  const tfList=[...new Set(['3m','5m','15m','30m','1h',normalizeTf(chartInterval)])];
+  const volumeRank=[...universe].sort((a,b)=>Number(b.turnover24h)-Number(a.turnover24h));
+  const movers=[...universe].sort((a,b)=>Math.abs(Number(b.price24hPcnt))-Math.abs(Number(a.price24hPcnt)));
+  const symbols=[...new Set([...volumeRank.slice(0,5).map(x=>x.symbol),...movers.slice(0,2).map(x=>x.symbol),symbol])].slice(0,8);
+  const jobs=[];for(const sym of symbols)for(const tf of tfList)jobs.push({sym,tf});
+  const out=Array(jobs.length);let idx=0;const worker=async()=>{while(idx<jobs.length){const i=idx++,j=jobs[i];try{const raw=await getScannerKlines(j.sym,j.tf);const cs=raw.slice().reverse().map(k=>({time:Math.floor(Number(k[0])/1000),open:+k[1],high:+k[2],low:+k[3],close:+k[4],volume:+k[5]}));const score=scoreEarlyPair(cs);if(score)out[i]={symbol:j.sym,tf:j.tf,...score,rankScore:score.score+(score.oscAligned?5:0)-(score.oscConflict?12:0)-(score.extension>1.2?8:0)};}catch{out[i]=null;}}};
+  await Promise.all(Array.from({length:Math.min(8,jobs.length)},worker));
+  const ranked=out.filter(x=>x&&x.eligible&&x.score>=58&&!x.oscConflict&&x.extension<1.4&&!isPairLossBlocked(x.symbol)&&!(x.symbol===rotateAwaySymbol&&Date.now()<rotateAwayUntil)&&Number(manualPairSkipUntil[x.symbol]||0)<=Date.now()).sort((a,b)=>b.rankScore-a.rankScore);
+  if(!ranked.length){$('#autoTfToggle').textContent='AUTO TF: ON · SCAN';return false;}
+  const best=ranked[0],currentTf=normalizeTf(chartInterval),currentBest=ranked.filter(x=>x.tf===currentTf).sort((a,b)=>b.rankScore-a.rankScore)[0];
+  const edge=currentBest?best.rankScore-currentBest.rankScore:99;
+  if(best.tf===currentTf||edge<8){$('#autoTfToggle').textContent=`AUTO TF: ON · ${TF_LABEL[currentTf]||currentTf}`;return false;}
+  if(best.rankScore<58)return false;
+  const oldSymbol=symbol,oldTf=currentTf;
+  $('#scanState').textContent=`AUTO TF → ${best.symbol} · ${TF_LABEL[best.tf]||best.tf} · ${best.bias} ${best.score}`;
+  if(best.symbol!==symbol)await switchSymbol(best.symbol);
+  if(best.tf!==normalizeTf(chartInterval))await setVisualTf(best.tf);
+  if(symbol===best.symbol&&normalizeTf(chartInterval)===best.tf){lastTfSwitchAt=Date.now();$('#autoTfToggle').textContent=`AUTO TF: ON · ${TF_LABEL[best.tf]||best.tf}`;log(`AUTO TIMEFRAME SWITCH · ${oldSymbol}/${TF_LABEL[oldTf]||oldTf} → ${best.symbol}/${TF_LABEL[best.tf]||best.tf} · ${best.bias} · score ${best.score}/100 · kandidat momentum, bukan jaminan profit`);return true;}
+  return false;
+ }finally{multiTfBusy=false;}
+}
+const IDR=16000; const fmtP=n=>Number(n||0).toLocaleString('en-US',{maximumFractionDigits:priceDecimals(n)}); const fmtIDR=n=>{const v=Number(n||0);const rounded=Math.round(v);return 'Rp '+(Math.abs(v)>0&&rounded===0?v.toLocaleString('id-ID',{minimumFractionDigits:2,maximumFractionDigits:2}):rounded.toLocaleString('id-ID'));};
+function priceDecimals(n){n=Math.abs(Number(n)||0);if(n>=1000)return 2;if(n>=100)return 3;if(n>=1)return 4;if(n>=0.1)return 5;if(n>=0.01)return 6;if(n>=0.001)return 7;return 8}
+function fmtTradeP(n){const d=priceDecimals(n);return Number(n||0).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d})}
+
+function clearPositionVisuals(){ positionPriceLines=[]; if(chart)chart.setPosition(null); }
+function renderTradeVisuals(){
+ if(!chart)return;
+ try{
+  chart.setPosition(paperPos&&hasValidPaperPosition()?paperPos:null);
+  chart.setMarkers(tradeMarkers.filter(m=>m&&m.symbol===symbol));
+  if(srActive)chart.setSR(sr(candles));
+ }catch(e){log('Trade visual render error: '+e.message)}
+}
+function addTradeMarker(type,p){
+ if(!p)return;
+ const t=Math.floor(Number(p.entryCandleTime||p.opened||Date.now()/1000));
+ tradeMarkers.push({symbol:p.symbol||symbol,time:t,position:p.side==='BUY'?'belowBar':'aboveBar',color:p.side==='BUY'?'#19d59a':'#ff5c72',shape:p.side==='BUY'?'arrowUp':'arrowDown',text:`MANUAL ${p.side} ${fmtTradeP(p.entry)}`});
+ if(tradeMarkers.length>50)tradeMarkers=tradeMarkers.slice(-50);
+ renderTradeVisuals();
+}
+function getPairLossStreak(sym=symbol){return Math.max(0,Number(pairLossStreak?.[sym])||0)}
+function isPairLossBlocked(sym=symbol){return Number(pairCooldownUntil?.[sym]||0)>Date.now()}
+function blockPairAfterLoss(sym=symbol){pairCooldownUntil[sym]=Date.now()+PAIR_LOSS_COOLDOWN_MS;return pairCooldownUntil[sym]}
+function updatePairLossUI(sym=symbol){const n=getPairLossStreak(sym),until=Number(pairCooldownUntil?.[sym]||0),blocked=until>Date.now();if($('#pairLossSymbol'))$('#pairLossSymbol').textContent=sym;if($('#pairLossStreak')){const el=$('#pairLossStreak');el.textContent=blocked?`1 / 1 · ${Math.ceil((until-Date.now())/60000)}m`:`${n} / 1`;el.className=blocked?'down':n>0?'yellow':'up'}}
+function persist(){try{localStorage.setItem('ilhamPaperState',JSON.stringify({date:new Date().toISOString().slice(0,10),symbol,paperPos,paperPnl,dailyPnl,lossStreak,pairLossStreak,pairCooldownUntil,tradeStats,tradeHistory,tradeMarkers,margin:+$('#margin').value||DEFAULT_PAPER_MARGIN_IDR,leverage:+$('#lev').value||DEFAULT_LEVERAGE,maxFloatLoss:HARD_RISK_PCT,pairScanner:auto}))}catch{}}
+function restore(){try{let x=JSON.parse(localStorage.getItem('ilhamPaperState')||'null');if(!x||x.date!==new Date().toISOString().slice(0,10))return;symbol=x.symbol||symbol;paperPos=x.paperPos||null;tradeHistory=Array.isArray(x.tradeHistory)?x.tradeHistory:[];paperPnl=tradeHistory.reduce((a,t)=>a+Number(t.pnl||0),0);tradeStats={wins:tradeHistory.filter(t=>Number(t.pnl||0)>0).length,losses:tradeHistory.filter(t=>Number(t.pnl||0)<0).length};dailyPnl=tradeHistory.reduce((a,t)=>a+Number(t.pnl||0),0);lossStreak=0;for(let i=tradeHistory.length-1;i>=0;i--){if(Number(tradeHistory[i].pnl||0)<0)lossStreak++;else break}pairLossStreak={};for(const t of tradeHistory){if(Number(t.pnl||0)<0)pairLossStreak[t.symbol]=(pairLossStreak[t.symbol]||0)+1;else pairLossStreak[t.symbol]=0}tradeMarkers=Array.isArray(x.tradeMarkers)?x.tradeMarkers.filter(m=>m&&m.symbol):[];if($('#margin'))$('#margin').value=Number(x.margin)||DEFAULT_PAPER_MARGIN_IDR;if($('#lev'))$('#lev').value=Number(x.leverage)||DEFAULT_LEVERAGE;pairCooldownUntil={};for(const t of tradeHistory){if(Number(t.pnl||0)<0){const until=Number(t.time||0)+PAIR_LOSS_COOLDOWN_MS;if(until>Date.now())pairCooldownUntil[t.symbol]=until}}if($('#maxFloatLoss'))$('#maxFloatLoss').value=HARD_RISK_PCT;auto=x.pairScanner!==false;if(!hasValidPaperPosition())paperPos=null;killed=false;updatePaperAccount(0);renderPaperOrderPreview();$('#dailyLossOut').textContent=fmtIDR(dailyPnl);$('#lossStreak').textContent=lossStreak;updatePairLossUI(symbol);log('Paper state reconciled from trade history · ENTRY LOCK tetap OFF saat startup')}catch(e){log('Paper restore error: '+e.message)}}
+function log(s){const e=document.createElement('div');e.className='log';e.textContent=new Date().toLocaleTimeString('id-ID')+' · '+s;$('#logs').prepend(e)}
+function ema(vals,p=20){let k=2/(p+1),e=vals[0],out=[];vals.forEach((v,i)=>{e=i? v*k+e*(1-k):v;out.push(e)});return out}
+function atr(cs=candles){if(cs.length<20)return 0;let a=[];for(let i=1;i<cs.length;i++)a.push(Math.max(cs[i].high-cs[i].low,Math.abs(cs[i].high-cs[i-1].close),Math.abs(cs[i].low-cs[i-1].close)));return a.slice(-14).reduce((x,y)=>x+y,0)/Math.min(14,a.length)}
+function sr(cs=candles){let h=[],l=[];for(let i=2;i<cs.length-2;i++){if(cs[i].high>cs[i-1].high&&cs[i].high>cs[i+1].high)h.push(cs[i].high);if(cs[i].low<cs[i-1].low&&cs[i].low<cs[i+1].low)l.push(cs[i].low)}let p=cs.at(-1)?.close||0;let resistance=h.filter(x=>x>p).sort((a,b)=>a-b)[0]||Math.max(...cs.slice(-40).map(x=>x.high));let support=l.filter(x=>x<p).sort((a,b)=>b-a)[0]||Math.min(...cs.slice(-40).map(x=>x.low));return{support,resistance}}
+function analyzeData(cs){
+ if(cs.length<30)return null;
+ const c=cs.at(-1),p=cs.at(-2),cl=cs.map(x=>x.close),es=ema(cl),e=es.at(-1),A=atr(cs),{support,resistance}=sr(cs);
+ const body=Math.abs(c.close-c.open),range=Math.max(c.high-c.low,Number.EPSILON),wU=c.high-Math.max(c.open,c.close),wL=Math.min(c.open,c.close)-c.low;
+ const bodyPct=body/range, bull=c.close>c.open,bear=c.close<c.open, trend=c.close>=e?1:-1;
+ const momentum=(c.close-p.close)/(A||Math.max(c.close*.001,1));
+ const avgVol=cs.slice(-21,-1).reduce((a,x)=>a+x.volume,0)/20,vol=avgVol?c.volume/avgVol:1;
+ const prev20=cs.slice(-21,-1), hi=Math.max(...prev20.map(x=>x.high)),lo=Math.min(...prev20.map(x=>x.low));
+ const breakoutLong=c.close>hi,breakoutShort=c.close<lo;
+ const nearRes=Math.abs(c.close-resistance)/(A||1)<1.25,nearSup=Math.abs(c.close-support)/(A||1)<1.25;
+ const rejectLong=wL>Math.max(body*1.35,A*.15)&&c.close>c.open, rejectShort=wU>Math.max(body*1.35,A*.15)&&c.close<c.open;
+ const emaSlope=es.length>5?(e-es.at(-6))/(A||1):0;
+ const regime=Math.abs(momentum)>2.8?'EXTREME VOLATILITY':Math.abs(momentum)>1.6?'HIGH VOLATILITY':Math.abs(momentum)<.35?'RANGE':'TREND';
+ let long=0,short=0;
+ long+=trend===1?20:0; short+=trend===-1?20:0;
+ long+=emaSlope>0?10:0; short+=emaSlope<0?10:0;
+ long+=momentum>0?Math.min(15,Math.max(0,momentum*7)):0; short+=momentum<0?Math.min(15,Math.max(0,-momentum*7)):0;
+ long+=vol>=1.15?10:vol>=.8?5:0; short+=vol>=1.15?10:vol>=.8?5:0;
+ long+=breakoutLong?20:rejectLong?10:nearSup?5:0; short+=breakoutShort?20:rejectShort?10:nearRes?5:0;
+ long+=bull&&bodyPct>=.45?10:0; short+=bear&&bodyPct>=.45?10:0;
+ if(regime==='RANGE'){long-=8;short-=8} if(regime==='EXTREME VOLATILITY'){long-=12;short-=12}
+ long=Math.max(0,Math.min(100,long)); short=Math.max(0,Math.min(100,short));
+ const score=Math.max(long,short);
+ // Direction is score-led, with a small LONG preference. A SHORT must have clearly stronger evidence.
+ const bias=long>=short-LONG_PREFERENCE_GAP&&long>0?'LONG':short>long+LONG_PREFERENCE_GAP?'SHORT':bull?'LONG':bear?'SHORT':'NEUTRAL';
+ const reasons=[];
+ if(regime==='EXTREME VOLATILITY')reasons.push('volatilitas ekstrem');
+ if(Math.abs(momentum)<.20)reasons.push('momentum sangat lemah');
+ if(vol<.65)reasons.push('volume relatif rendah');
+ if(bias==='NEUTRAL')reasons.push('LONG/SHORT belum unggul');
+ if(score<60)reasons.push('score rendah — TIDAK lagi menjadi syarat entry');
+ if(bias==='LONG'&&c.close<e)reasons.push('harga belum konfirmasi EMA20');
+ if(bias==='SHORT'&&c.close>e)reasons.push('harga belum konfirmasi EMA20');
+ // ACTIVE CANDLE MODE: score/confidence 60% is informational only.
+ // Entry is driven by the selected chart timeframe's candle direction + real-time momentum.
+ const longSetup=bull&&bodyPct>=0.30&&momentum>0.08&&!nearRes&&regime!=='EXTREME VOLATILITY';
+ const shortSetup=bear&&bodyPct>=0.30&&momentum<-0.08&&!nearSup&&regime!=='EXTREME VOLATILITY';
+ if(bias==='LONG'&&!longSetup)reasons.push('candle LONG belum cukup kuat');
+ if(bias==='SHORT'&&!shortSetup)reasons.push('candle SHORT belum cukup kuat');
+ const shortApproved=shortSetup&&short>long+LONG_PREFERENCE_GAP;
+ const allowed=regime!=='EXTREME VOLATILITY'&&((bias==='LONG'&&longSetup)||(bias==='SHORT'&&shortApproved));
+ const slDist=Math.max(A*.8,c.close*.004),rr=2,tpDist=slDist*rr;
+ return {c,e,A,support,resistance,body,range,wU,wL,bodyPct,bull,bear,trend,momentum,vol,breakoutLong,breakoutShort,rejectLong,rejectShort,nearRes,nearSup,emaSlope,regime,longScore:long,shortScore:short,score,bias,reasons,allowed,slDist,tpDist,rr};
+}
+function analyze(){return analyzeData(candles)}
+function timeSignalData(){
+ const activeTf=normalizeTf(chartInterval),tfLabel=(TF_LABEL&&TF_LABEL[activeTf])||activeTf.toUpperCase();
+ const src=entryCandles.length>=35?entryCandles:candles;
+ if(src.length<35)return {side:'HOLD',score:0,decisionTime:src.at(-1)?.time||0,reason:`menunggu histori candle ${tfLabel}`};
+ // Evaluate only fully closed candles; never use the live/forming candle for entry signals.
+ const closed=src.slice(0,-1), a=analyzeData(closed);
+ if(!a)return {side:'HOLD',score:0,decisionTime:closed.at(-1)?.time||0,reason:'data belum cukup'};
+ const c=closed.at(-1),prev=closed.at(-2),prev2=closed.at(-3),atrVal=a.A||Math.max(c.close*.001,1);
+ const mom=(c.close-prev.close)/atrVal, prevMom=(prev.close-prev2.close)/atrVal;
+ const bull=c.close>c.open,bear=c.close<c.open,prevBull=prev.close>prev.open,prevBear=prev.close<prev.open;
+ const emaUp=a.emaSlope>0.025,emaDown=a.emaSlope<-.025,above=c.close>a.e,below=c.close<a.e;
+ const extension=Math.abs(c.close-a.e)/atrVal,notExtended=extension<=0.95;
+ const avgVol=closed.slice(-21,-1).reduce((sum,x)=>sum+(Number(x.volume)||0),0)/Math.max(1,closed.slice(-21,-1).length);
+ const volumeRatio=avgVol>0?(Number(c.volume)||0)/avgVol:1;
+ const range=Math.max(c.high-c.low,Number.EPSILON),body=Math.abs(c.close-c.open),bodyPct=body/range;
+ const upperWick=c.high-Math.max(c.open,c.close),lowerWick=Math.min(c.open,c.close)-c.low;
+ const upperRatio=upperWick/range,lowerRatio=lowerWick/range;
+ const wickSignal=upperRatio>=0.45&&upperRatio>lowerRatio*1.35?'sumbu atas panjang: tekanan jual/penolakan di atas':lowerRatio>=0.45&&lowerRatio>upperRatio*1.35?'sumbu bawah panjang: tekanan beli/penolakan di bawah':upperRatio>=0.30&&lowerRatio>=0.30?'sumbu dua arah panjang: volatilitas/ragu-ragu':'sumbu relatif pendek: penolakan belum dominan';
+ const wickBullReject=lowerRatio>=0.38&&lowerRatio>upperRatio*1.25;
+ const wickBearReject=upperRatio>=0.38&&upperRatio>lowerRatio*1.25;
+ const cleanBull=lowerWick<=body*1.5 && upperWick<=body*1.8;
+ const cleanBear=upperWick<=body*1.5 && lowerWick<=body*1.8;
+ const nearResistance=(a.resistance>c.close)&&((a.resistance-c.close)/atrVal<0.65);
+ const nearSupport=(a.support<c.close)&&((c.close-a.support)/atrVal<0.65);
+ // More selective setup: two same-direction closes, aligned EMA slope, meaningful momentum,
+ // adequate relative volume, no stretched entry, and no immediate nearby S/R obstacle.
+ // Balanced confirmation: avoid HOLD from an overly strict requirement that every filter
+ // must pass at once. Keep closed candles only; allow either 2-candle continuation OR
+ // a strong latest candle with momentum/EMA agreement. S/R and wick become score/risk
+ // warnings rather than unconditional blockers unless the obstacle is very close.
+ const buyContinuation=bull&&prevBull&&mom>0&&prevMom>=0;
+ const sellContinuation=bear&&prevBear&&mom<0&&prevMom<=0;
+ const buyImpulse=bull&&bodyPct>=0.48&&mom>=0.16&&above&&emaUp;
+ const sellImpulse=bear&&bodyPct>=0.48&&mom<=-0.16&&below&&emaDown;
+ const buyOK=(buyContinuation||buyImpulse)&&above&&mom>0&&volumeRatio>=0.55&&notExtended&&!nearResistance&&a.regime!=='EXTREME VOLATILITY'&&!wickBearReject;
+ const sellOK=(sellContinuation||sellImpulse)&&below&&mom<0&&volumeRatio>=0.55&&notExtended&&!nearSupport&&a.regime!=='EXTREME VOLATILITY'&&!wickBullReject;
+ const buyScore=Math.min(100,(bull?14:0)+(prevBull?8:0)+(above?18:0)+(emaUp?16:0)+(mom>0?Math.min(18,Math.abs(mom)*10):0)+(volumeRatio>=0.55?8:0)+(notExtended?6:0)+(cleanBull?6:0)+(buyContinuation||buyImpulse?8:0));
+ const sellScore=Math.min(100,(bear?14:0)+(prevBear?8:0)+(below?18:0)+(emaDown?16:0)+(mom<0?Math.min(18,Math.abs(mom)*10):0)+(volumeRatio>=0.55?8:0)+(notExtended?6:0)+(cleanBear?6:0)+(sellContinuation||sellImpulse?8:0));
+ let side='HOLD',score=Math.max(buyScore,sellScore),reason='';
+ if(buyOK&&buyScore>=55&&buyScore>=sellScore+5){side='BUY';score=buyScore;reason=(buyImpulse?'candle bullish kuat':'2 candle bullish searah')+' + harga di atas EMA20 + momentum positif; '+wickSignal;}
+ else if(sellOK&&sellScore>=55&&sellScore>=buyScore+5){side='SELL';score=sellScore;reason=(sellImpulse?'candle bearish kuat':'2 candle bearish searah')+' + harga di bawah EMA20 + momentum negatif; '+wickSignal;}
+ else {
+  const why=[];
+  if(!notExtended)why.push('harga terlalu jauh dari EMA20 — hindari mengejar harga');
+  if(nearResistance&&bull)why.push('harga dekat resistance');
+  if(nearSupport&&bear)why.push('harga dekat support');
+  if(volumeRatio<0.55)why.push('volume sangat rendah');
+  if(!emaUp&&!emaDown)why.push('EMA20 datar');
+  if(Math.abs(mom)<0.08)why.push('momentum lemah');
+  if(wickBearReject)why.push('sumbu atas dominan: risiko penolakan turun');
+  if(wickBullReject)why.push('sumbu bawah dominan: risiko pantulan naik');
+  if(a.regime==='EXTREME VOLATILITY')why.push('volatilitas ekstrem');
+  if(buyScore<55&&sellScore<55)why.push('skor kedua arah di bawah 55');
+  if(Math.abs(buyScore-sellScore)<5)why.push('arah BUY/SELL belum unggul minimal 5 poin');
+  if(!why.length)why.push('konfirmasi candle dan momentum belum searah');
+  reason=why.join(' · ')+' · '+wickSignal;
+ }
+ return {side,score,decisionTime:c.time,reason,momentum:mom,ema:a.e,close:c.close,extension,volumeRatio,upperWick:upperRatio,lowerWick:lowerRatio,wickSignal,wickBullReject,wickBearReject};
+}
+
+let lastExitNoticeKey='',exitNoticeTimer=0;
+function activeManagedPosition(){
+ if(hasValidPaperPosition())return {symbol:paperPos.symbol,side:paperPos.side,entry:Number(paperPos.entry),source:'PAPER'};
+ if(mode==='demo'){const p=currentDemoPosition();if(p)return {symbol:p.symbol,side:demoPositionSide(p),entry:Number(p.avgPrice||p.entryPrice||0),source:'BYBIT DEMO'};}
+ return null;
+}
+function evaluateExitWarning(ts){
+ const p=activeManagedPosition();if(!p||p.symbol!==symbol||!ts||!ts.decisionTime)return;
+ const side=String(p.side).toUpperCase(),opposite=side==='BUY'?'SELL':'BUY';
+ // Exit alerts use the selected chart timeframe's completed candles.
+ const activeTf=normalizeTf(chartInterval),tfLabel=(TF_LABEL&&TF_LABEL[activeTf])||activeTf.toUpperCase();
+ const closed=(entryCandles.length>=35?entryCandles:candles).slice(0,-1);if(closed.length<30)return;
+ const a=analyzeData(closed);if(!a)return;const c=closed.at(-1),prev=closed.at(-2),atrVal=a.A||Math.max(c.close*.001,1);
+ const mom=(c.close-prev.close)/atrVal,bear=c.close<c.open,bull=c.close>c.open;
+ const candleAgainst=side==='BUY'?bear:bull;
+ const momentumAgainst=side==='BUY'?mom<=-.10:mom>=.10;
+ const emaAgainst=side==='BUY'?(c.close<a.e&&a.emaSlope<0):(c.close>a.e&&a.emaSlope>0);
+ const momentumWeak=side==='BUY'?mom<0:mom>0;
+ const flags=[candleAgainst,momentumAgainst,emaAgainst];
+ // Warn when at least two independent reversal signs align, or all three show weakening.
+ const count=flags.filter(Boolean).length;
+ const weakening=(candleAgainst&&momentumWeak)||(emaAgainst&&momentumWeak);
+ if(count<2&&!weakening)return;
+ const key=`${p.symbol}:${side}:${c.time}:${count}`;if(key===lastExitNoticeKey)return;lastExitNoticeKey=key;
+ const box=$('#exitNotice'),title=$('#exitNoticeTitle'),text=$('#exitNoticeText');if(!box||!title||!text)return;
+ const pnl=hasValidPaperPosition()?currentPaperPnl(livePrice||c.close):(mode==='demo'&&currentDemoPosition()?demoPnlForPosition(currentDemoPosition()):null);
+ title.textContent=`CEK TUTUP POSISI · ${side} · ${p.symbol} · ${tfLabel}`;
+ const why=[];if(candleAgainst)why.push('candle berlawanan');if(momentumAgainst)why.push('momentum berbalik');if(emaAgainst)why.push('harga/EMA20 berlawanan');
+ text.textContent=`Peringatan risiko: ${why.join(', ')||'momentum melemah'}. Pertimbangkan cek/tutup manual sesuai SL dan rencana. ${pnl==null?'':`PnL saat ini ${fmtIDR(pnl)}. `}Ini bukan kepastian harga akan berbalik; tidak ada posisi yang ditutup otomatis.`;
+ box.className='entry-notice exit show';clearTimeout(exitNoticeTimer);exitNoticeTimer=setTimeout(()=>box.classList.remove('show'),16000);
+ try{if(navigator.vibrate)navigator.vibrate([180,80,180])}catch{}log(`EXIT WARNING · ${side} ${p.symbol} · candle ${tfLabel} menunjukkan pelemahan/arah berlawanan · manual only`);
+}
+function forecastFromLastWick(){
+ // Probabilistic heuristic: evaluates the last 3 CLOSED candles of the selected timeframe.
+ const src=entryCandles.length>=35?entryCandles:candles;
+ const cs=src.slice(0,-1); if(cs.length<25)return null;
+ const recent=cs.slice(-3); if(recent.length<3)return null;
+ const c=recent[2],p=recent[1],p2=recent[0];
+ const a=analyzeData(cs); if(!a||!a.A)return null;
+ const shape=x=>{
+   const range=Math.max(x.high-x.low,Number.EPSILON);
+   const upper=(x.high-Math.max(x.open,x.close))/range;
+   const lower=(Math.min(x.open,x.close)-x.low)/range;
+   const closePos=(x.close-x.low)/range;
+   const body=Math.abs(x.close-x.open)/range;
+   return {range,upper,lower,closePos,body,bull:x.close>x.open,bear:x.close<x.open};
+ };
+ const sh=recent.map(shape), last=sh[2];
+ const mom1=(c.close-p.close)/a.A, mom2=(p.close-p2.close)/a.A;
+ let bull=0,bear=0,why=[];
+ // Weight the latest candle most, but require repeated evidence across 2-3 candles.
+ const lowerReject=sh.filter(x=>x.lower>=.35&&x.lower>x.upper*1.15).length;
+ const upperReject=sh.filter(x=>x.upper>=.35&&x.upper>x.lower*1.15).length;
+ if(last.lower>=.38&&last.lower>last.upper*1.15){bull+=2;why.push('sumbu bawah candle terakhir dominan')}
+ else if(lowerReject>=2){bull+=2;why.push('penolakan bawah berulang pada 2–3 candle')}
+ if(last.upper>=.38&&last.upper>last.lower*1.15){bear+=2;why.push('sumbu atas candle terakhir dominan')}
+ else if(upperReject>=2){bear+=2;why.push('penolakan atas berulang pada 2–3 candle')}
+ // Close location of the last candle and recent candle sequence.
+ if(last.closePos>=.68)bull++; else if(last.closePos<=.32)bear++;
+ const greenCount=sh.filter(x=>x.bull).length, redCount=sh.filter(x=>x.bear).length;
+ if(greenCount>=2)bull++; if(redCount>=2)bear++;
+ // Avoid treating a wick alone as direction: confirm with trend and momentum.
+ if(c.close>a.e&&a.emaSlope>0)bull++;
+ if(c.close<a.e&&a.emaSlope<0)bear++;
+ if(mom1>.10&&mom2>0)bull++;
+ if(mom1<-.10&&mom2<0)bear++;
+ // If upper/lower rejection are both frequent, mark as conflict.
+ const mixedRejection=lowerReject>0&&upperReject>0;
+ let direction='BELUM JELAS',strength='konfirmasi kurang';
+ if(bull>=3&&bull>=bear+2&&!mixedRejection){direction='POTENSI NAIK';strength=bull>=5?'dukungan relatif kuat':'sedang'}
+ else if(bear>=3&&bear>=bull+2&&!mixedRejection){direction='POTENSI TURUN';strength=bear>=5?'dukungan relatif kuat':'sedang'}
+ else if(mixedRejection)why.push('sumbu atas dan bawah sama-sama muncul; pasar tarik-menarik');
+ const summary=why.length?why.join('; '):'pola 2–3 candle belum menunjukkan penolakan dominan';
+ return {direction,strength,summary,barTime:c.time,bull,bear,upper:last.upper,lower:last.lower,
+   upperReject,lowerReject,greenCount,redCount,mom1,mom2};
+}
+function wickForecastText(){const f=forecastFromLastWick(),tfLabel=(TF_LABEL&&TF_LABEL[normalizeTf(chartInterval)])||normalizeTf(chartInterval).toUpperCase();if(!f)return `Analisis sumbu: menunggu data candle ${tfLabel} yang cukup.`;return `Analisis sumbu candle ${tfLabel} terakhir: ${f.direction} (${f.strength}) untuk 1–3 candle berikutnya, kira-kira 5–15 menit. ${f.summary}. Ini bias teknikal, bukan kepastian; tunggu konfirmasi candle berikutnya.`}
+function renderWickForecast(){
+ const f=forecastFromLastWick();
+ const ids=[['wick2m','wick2mSub'],['wick5m','wick5mSub'],['wick15m','wick15mSub']];
+ const dataEl=$('#wickDataStatus'),alignEl=$('#wickBiasAlign');
+ const now=Date.now(), wsAge=lastWsKlineAt?now-lastWsKlineAt:Infinity, tickAge=lastWsTickerAt?now-lastWsTickerAt:Infinity, restAge=lastRestSyncAt?now-lastRestSyncAt:Infinity;
+ const wsOk=!!(ws&&ws.readyState===1&&wsAge<8000), tickOk=tickAge<10000, restOk=restAge<15000;
+ let dataLabel='DATA TIDAK SEGAR',dataColor='#ff657a';
+ if(wsOk&&tickOk){dataLabel='LIVE · WS '+Math.max(0,Math.round(Math.max(wsAge,tickAge)/1000))+'s';dataColor='#19d59a'}
+ else if(restOk){dataLabel='REST RECOVERY · '+Math.round(restAge/1000)+'s';dataColor='#f4b942'}
+ else if(ws&&ws.readyState===1){dataLabel='WS TERHUBUNG · TICK BELUM SEGAR';dataColor='#f4b942'}
+ if(dataEl){dataEl.textContent=dataLabel;dataEl.style.color=dataColor;}
+ if(!f){ids.forEach(([a,b])=>{if($('#'+a))$('#'+a).textContent='Menunggu data';if($('#'+b))$('#'+b).textContent=`butuh candle ${((TF_LABEL&&TF_LABEL[normalizeTf(chartInterval)])||normalizeTf(chartInterval).toUpperCase())} tertutup`});$('#wickForecastDetail').textContent='Data candle belum cukup untuk menilai sumbu terakhir.';if(alignEl){alignEl.textContent='BELUM ADA DATA';alignEl.style.color='#f4b942'}return;}
+ // Show the dominant directional bias for each horizon. This is a directional estimate,
+ // not an entry instruction or a claim of certainty.
+ const clamp=n=>Math.max(0,Math.min(100,Math.round(n)));
+ const shortUp=(f.lower*1.25)+(f.upper*-.65)+((f.bull||0)*.025);
+ const shortDown=(f.upper*1.25)+(f.lower*-.65)+((f.bear||0)*.025);
+ const midUp=(f.bull||0)+Math.max(0,(f.lowerReject||0)-(f.upperReject||0))*.7;
+ const midDown=(f.bear||0)+Math.max(0,(f.upperReject||0)-(f.lowerReject||0))*.7;
+ const longUp=(f.bull||0)+(f.greenCount||0)*.55-(f.redCount||0)*.25;
+ const longDown=(f.bear||0)+(f.redCount||0)*.55-(f.greenCount||0)*.25;
+ const rows=[
+  {id:'wick2m',sub:'wick2mSub',up:shortUp,down:shortDown,desc:'arah dominan dari sumbu terakhir; sangat jangka pendek'},
+  {id:'wick5m',sub:'wick5mSub',up:midUp,down:midDown,desc:'gabungan 3 candle tertutup, penolakan, dan momentum'},
+  {id:'wick15m',sub:'wick15mSub',up:longUp,down:longDown,desc:'bias lanjutan dari pola 3 candle; bukan jaminan'}
+ ];
+ rows.forEach(r=>{
+  const isUp=r.up>=r.down;
+  const label=isUp?'NAIK ▲':'TURUN ▼';
+  const score=clamp(50+Math.abs(r.up-r.down)*12);
+  const el=$('#'+r.id);if(el){el.textContent=label;el.style.color=isUp?'#19d59a':'#ff657a';}
+  const sub=$('#'+r.sub);if(sub)sub.textContent=`dukungan relatif ${score}/100 · ${r.desc}`;
+ });
+ const main=analyze();const horizonUp=midUp>=midDown;const forecastBias=horizonUp?'LONG':'SHORT';const agrees=main&&main.bias===forecastBias;const alignText=main?(agrees?'SELARAS · '+forecastBias:'BERLAWANAN · '+forecastBias+' vs '+main.bias):'BIAS BELUM ADA';
+ if(alignEl){alignEl.textContent=alignText;alignEl.style.color=main&&agrees?'#19d59a':main?'#f4b942':'#f4b942';}
+ const staleNote=(!wsOk&&!restOk)?' PERINGATAN: data live/recovery tidak segar; jangan gunakan forecast ini untuk entry.':(!tickOk?' Harga ticker belum diperbarui baru-baru ini; perlakukan forecast dengan hati-hati.':'');
+ $('#wickForecastDetail').textContent=`Arah dominan dihitung dari 3 candle ${((TF_LABEL&&TF_LABEL[normalizeTf(chartInterval)])||normalizeTf(chartInterval).toUpperCase())} yang sudah ditutup. ${f.summary}. Sumbu candle terakhir: atas ${(f.upper*100).toFixed(0)}%, bawah ${(f.lower*100).toFixed(0)}% dari rentang; penolakan bawah ${f.lowerReject}/3 candle, penolakan atas ${f.upperReject}/3. Angka dukungan adalah skor internal, bukan probabilitas menang. ${alignText}. Forecast bukan instruksi entry; cek harga live dan risiko.${staleNote}`;
+}
+function intervalSec(){const t=normalizeTf(chartInterval);const seconds={'1m':60,'3m':180,'5m':300,'15m':900,'30m':1800,'1h':3600,'2h':7200,'4h':14400,'6h':21600,'12h':43200,'1d':86400,'1w':604800,'1M':2592000};return seconds[t]||900}
+let lastEntryNoticeKey='',entryNoticeTimer=0;
+function showEntryNotice(ts){if(!ts||!['BUY','SELL'].includes(ts.side))return;const activeTf=normalizeTf(chartInterval),tfLabel=(TF_LABEL&&TF_LABEL[activeTf])||activeTf.toUpperCase();const key=`${symbol}:${activeTf}:${ts.decisionTime}:${ts.side}`;if(key===lastEntryNoticeKey)return;lastEntryNoticeKey=key;if(!['BUY','SELL'].includes(ts.side)||Number(ts.score)<55)return;const box=$('#entryNotice'),title=$('#entryNoticeTitle'),text=$('#entryNoticeText');if(!box||!title||!text)return;box.className='entry-notice show '+ts.side.toLowerCase();title.textContent=`WAKTU ENTRY · ${ts.side} ${ts.side==='BUY'?'▲':'▼'} · ${symbol} · ${tfLabel}`;text.textContent=`Sinyal candle ${tfLabel} selesai · setup score ${Math.round(ts.score)} · ${ts.reason||'cek chart dan risiko'}. ${wickForecastText()} Ini notifikasi saja—konfirmasi chart dan risiko sebelum entry manual.`;clearTimeout(entryNoticeTimer);entryNoticeTimer=setTimeout(()=>box.classList.remove('show'),12000);try{if(navigator.vibrate)navigator.vibrate([100,50,100])}catch{}log(`ENTRY ALERT ${ts.side} · ${symbol} · ${tfLabel} · score ${Math.round(ts.score)} · manual only`)}
+function updateClockWib(){const d=new Date();const p=new Intl.DateTimeFormat('id-ID',{timeZone:'Asia/Jakarta',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).formatToParts(d);const g=t=>p.find(x=>x.type===t)?.value||'';const el=$('#clockWib');if(el)el.textContent=`WIB ${g('hour')}:${g('minute')}:${g('second')}`;}
+function bbOscillatorReaction(cs){
+ // Bollinger Bands 20/2 + RSI14 + MACD(12,26,9) + StochRSI(14,3,3), closed candles only.
+ if(!Array.isArray(cs)||cs.length<35)return {ready:false,direction:'NEUTRAL',score:0,text:'Menunggu 35 candle tertutup untuk BB + oscillator',detail:'Data indikator belum cukup'};
+ const close=cs.map(x=>Number(x.close)),last=cs.at(-1),prev=cs.at(-2),n=20;
+ const window=close.slice(-n),mid=window.reduce((a,b)=>a+b,0)/n;
+ const sd=Math.sqrt(window.reduce((a,v)=>a+(v-mid)**2,0)/n),upper=mid+2*sd,lower=mid-2*sd;
+ const body=Math.abs(last.close-last.open),uw=last.high-Math.max(last.open,last.close),lw=Math.min(last.open,last.close)-last.low;
+ const lowerTouch=last.low<=lower*(1+0.0015),upperTouch=last.high>=upper*(1-0.0015);
+ const lowerBounce=lowerTouch&&last.close>lower&&(last.close>last.open||lw>body*1.15);
+ const upperReject=upperTouch&&last.close<upper&&(last.close<last.open||uw>body*1.15);
+ const upperBreak=last.close>upper&&last.close>last.open,lowerBreak=last.close<lower&&last.close<last.open;
+ // Wilder RSI
+ const rsi=Array(close.length).fill(null);let gain=0,loss=0;
+ for(let i=1;i<close.length;i++){const d=close[i]-close[i-1];if(i<=14){gain+=Math.max(0,d);loss+=Math.max(0,-d);if(i===14)rsi[i]=100-100/(1+(loss?gain/loss:99));}else{gain=(gain*13+Math.max(0,d))/14;loss=(loss*13+Math.max(0,-d))/14;rsi[i]=100-100/(1+(loss?gain/loss:99));}}
+ const r=rsi.at(-1),rp=rsi.at(-2);const rsiBull=(r<35&&r>rp)||(rp<30&&r>=30),rsiBear=(r>65&&r<rp)||(rp>70&&r<=70);
+ const ema=(arr,period)=>{const k=2/(period+1),out=[];arr.forEach((v,i)=>out.push(i? v*k+out[i-1]*(1-k):v));return out;};
+ const e12=ema(close,12),e26=ema(close,26),mac=e12.map((v,i)=>v-e26[i]),sig=ema(mac,9),hist=mac.map((v,i)=>v-sig[i]);
+ const macBull=(hist.at(-1)>hist.at(-2)&&mac.at(-1)>sig.at(-1))||(hist.at(-2)<=0&&hist.at(-1)>0),macBear=(hist.at(-1)<hist.at(-2)&&mac.at(-1)<sig.at(-1))||(hist.at(-2)>=0&&hist.at(-1)<0);
+ const stoch=Array(close.length).fill(null);
+ for(let i=14;i<rsi.length;i++){const vals=rsi.slice(Math.max(0,i-13),i+1).filter(Number.isFinite);if(vals.length>=14){const mn=Math.min(...vals),mx=Math.max(...vals);stoch[i]=(mx===mn)?50:100*(rsi[i]-mn)/(mx-mn);}}
+ const smooth=(arr,period)=>arr.map((v,i)=>{const z=arr.slice(Math.max(0,i-period+1),i+1).filter(Number.isFinite);return z.length===period?z.reduce((a,b)=>a+b,0)/period:null;});
+ const k=smooth(stoch,3),d=smooth(k,3),kv=k.at(-1),kp=k.at(-2),dv=d.at(-1),dp=d.at(-2);
+ const stochBull=Number.isFinite(kv)&&Number.isFinite(dv)&&Number.isFinite(kp)&&Number.isFinite(dp)&&kp<=dp&&kv>dv&&kv<35;
+ const stochBear=Number.isFinite(kv)&&Number.isFinite(dv)&&Number.isFinite(kp)&&Number.isFinite(dp)&&kp>=dp&&kv<dv&&kv>65;
+ let bull=0,bear=0,bb='Di dalam Bollinger Band';
+ if(lowerBounce){bull+=2;bb='LOWER BAND ditolak → pantulan naik';}
+ if(upperReject){bear+=2;bb='UPPER BAND ditolak → potensi turun';}
+ if(upperBreak){bull+=1;bb='Close di atas UPPER BAND → breakout, waspadai pullback';}
+ if(lowerBreak){bear+=1;bb='Close di bawah LOWER BAND → breakdown, waspadai pantulan';}
+ if(rsiBull)bull++;if(rsiBear)bear++;if(macBull)bull++;if(macBear)bear++;if(stochBull)bull++;if(stochBear)bear++;
+ const delta=bull-bear,direction=delta>=2?'LONG':delta<=-2?'SHORT':'NEUTRAL';
+ const fmt=x=>Number.isFinite(x)?x.toFixed(1):'—';
+ const detail=`RSI ${fmt(r)} (${rsiBull?'bullish cross':rsiBear?'bearish cross':'netral'}) · MACD ${macBull?'menguat/BUY':macBear?'melemah/SELL':'netral'} · StochRSI K/D ${fmt(kv)}/${fmt(dv)} (${stochBull?'golden cross':stochBear?'dead cross':'netral'})`;
+ const supportScore=Math.min(100,Math.round(50+Math.abs(delta)*8));
+ return {ready:true,direction,score:supportScore,delta,bull,bear,bb,detail,upper,mid,lower,rsi:r,macBull,macBear,stochBull,stochBear,lowerBounce,upperReject,upperBreak,lowerBreak};
+}
+function renderFinalSignal(){
+ const badge=$('#finalSignalBadge'),reason=$('#finalSignalReason');if(!badge||!reason)return;
+ const panelHead=$('#finalSignalPanel .phead');if(panelHead)panelHead.textContent=`FINAL SIGNAL · KEPUTUSAN UTAMA ${(TF_LABEL&&TF_LABEL[normalizeTf(chartInterval)])||normalizeTf(chartInterval).toUpperCase()}`;
+ const activeTf=normalizeTf(chartInterval),tfLabel=(TF_LABEL&&TF_LABEL[activeTf])||activeTf.toUpperCase();
+ const activeCandles=Array.isArray(entryCandles)&&entryCandles.length>=31?entryCandles:candles;
+ const closedActive=activeCandles.slice(0,-1);
+ // Early heads-up: evaluate the forming candle with current ticker, but never treat it as a confirmed entry.
+ const earlyCandles=activeCandles.map(x=>({...x}));
+ if(earlyCandles.length&&Number.isFinite(Number(livePrice))&&Number(livePrice)>0){const ec=earlyCandles[earlyCandles.length-1];ec.close=Number(livePrice);ec.high=Math.max(Number(ec.high)||Number(livePrice),Number(livePrice));ec.low=Math.min(Number(ec.low)||Number(livePrice),Number(livePrice));}
+ const earlySetup=earlyCandles.length>=36?scoreEarlyPair([...earlyCandles,earlyCandles[earlyCandles.length-1]]):null;
+ const a=closedActive.length>=30?analyzeData(closedActive):null,f=forecastFromLastWick();
+ const dataText=($('#wickDataStatus')?.textContent||'BELUM DIKETAHUI').trim();
+ const isLive=dataText.startsWith('LIVE'),isRecovery=dataText.startsWith('REST RECOVERY');
+ // Recovery data may be useful for display but does not unlock a new entry until live streaming is healthy.
+ const dataFresh=isLive||((isRecovery)&&Date.now()-lastRestSyncAt<10000&&Number.isFinite(livePrice)&&livePrice>0);
+ const osc=bbOscillatorReaction(closedActive);
+ const bbEl=$('#bbReaction'),oscEl=$('#bbOscScore'),oscDetailEl=$('#bbOscDetail');if(bbEl){bbEl.textContent=osc.ready?osc.bb:'MENUNGGU DATA';bbEl.style.color=osc.ready&&osc.direction==='LONG'?'#19d59a':osc.ready&&osc.direction==='SHORT'?'#ff657a':'#f4b942';}if(oscEl){oscEl.textContent=osc.ready?`${osc.direction} · ${osc.score}/100`:'—';oscEl.style.color=osc.ready&&osc.direction==='LONG'?'#19d59a':osc.ready&&osc.direction==='SHORT'?'#ff657a':'#f4b942';}if(oscDetailEl)oscDetailEl.textContent=osc.ready?osc.detail:osc.text;
+ // Score the forming candle for early momentum; use the same scorer as the scanner to keep direction consistent.
+ const scoredSetup=activeCandles.length>=35?scoreEarlyPair(earlyCandles):null;
+ const bias=scoredSetup?.bias||a?.bias||'NEUTRAL',score=Number(scoredSetup?.score??a?.score??0);
+ let forecastSide='';
+ if(f){
+  const up=(f.bull||0)+Math.max(0,(f.lowerReject||0)-(f.upperReject||0))*.7;
+  const down=(f.bear||0)+Math.max(0,(f.upperReject||0)-(f.lowerReject||0))*.7;
+  forecastSide=up>=down?'LONG':'SHORT';
+ }
+ const aligned=!!forecastSide&&forecastSide===bias,scoreOk=score>=38,setupReady=!!scoredSetup&&scoredSetup.score>=38&&scoredSetup.fresh&&scoredSetup.extension<=1.5&&['LONG','SHORT'].includes(bias),position=activeManagedPosition();
+ // Persistent early-warning card: reacts before candle close, respects active timeframe, and is explicitly not an entry command.
+ let earlyCard=$('#earlyMomentumCard');if(!earlyCard){earlyCard=document.createElement('div');earlyCard.id='earlyMomentumCard';earlyCard.className='metric';earlyCard.style.cssText='margin:8px 0;border:1px solid #334155;padding:10px;border-radius:8px';const anchor=$('#finalSignalReason');if(anchor)anchor.insertAdjacentElement('afterend',earlyCard);}
+ if(earlyCard){const etf=(TF_LABEL&&TF_LABEL[normalizeTf(chartInterval)])||normalizeTf(chartInterval).toUpperCase();const eok=!!(dataFresh&&earlySetup&&earlySetup.score>=38&&earlySetup.fresh&&earlySetup.extension<=1.5&&['LONG','SHORT'].includes(earlySetup.bias));earlyCard.innerHTML=eok?`<b style="color:${earlySetup.bias==='LONG'?'#19d59a':'#ff657a'}">EARLY WARNING · ${earlySetup.bias==='LONG'?'BUY / LONG':'SELL / SHORT'} · ${etf} · ${earlySetup.score}/100</b><div class="small muted" style="margin-top:4px">Momentum mulai terdeteksi pada candle yang masih berjalan. EMA20 distance ${earlySetup.extension.toFixed(2)} ATR · volume x${Number(earlySetup.volRatio||0).toFixed(2)}. Tunggu konfirmasi; ini peringatan awal, bukan perintah entry.</div>`:`<b style="color:#f4b942">EARLY WARNING · BELUM ADA PEMICU ${etf}</b><div class="small muted" style="margin-top:4px">${!dataFresh?'Data live belum segar.':earlySetup?.reason||'Menunggu momentum awal dan anti-chase.'} Sinyal final tetap memakai candle tertutup.</div>`;}
+ let signal='WAIT',why=[],checks=[];
+ if(!a||!f){why.push(`Data candle ${tfLabel} belum cukup`);checks.push(`✕ Data candle ${tfLabel} belum cukup untuk keputusan.`);}
+ else {
+  checks.push(`${dataFresh?'✓':'✕'} Koneksi: ${isLive?'LIVE — data streaming aktif':dataFresh?'REST RECOVERY — ticker/candle REST baru saja diperbarui':isRecovery?`REST RECOVERY — data pemulihan sudah usang (${dataText.replace(/^REST RECOVERY\s*[·:-]?\s*/,'')})`:`${dataText} — status LIVE belum terkonfirmasi`}`);
+  checks.push(`${scoreOk?'✓':'✕'} Skor setup ${tfLabel} candle tertutup: ${Math.round(score)}/100 (ambang kandidat 42; kurang ${Math.max(0,42-Math.round(score))} poin). Semua skor mengikuti timeframe aktif.`);
+  checks.push(`${aligned?'✓':'⚠'} Arah: strategi ${bias} · forecast ${forecastSide||'belum tersedia'} (${aligned?'selaras':'berlawanan/ belum tersedia'}; forecast hanya konfirmasi tambahan)`);
+  checks.push(`${!osc.ready?'…':osc.direction==='NEUTRAL'?'⚠':osc.direction===bias?'✓':'⚠'} BB + oscillator: ${osc.ready?`${osc.bb}; konfluensi ${osc.direction} (${osc.score}/100). ${osc.detail}`:osc.text}`);
+  checks.push(`${setupReady?'✓':'✕'} Momentum awal: ${scoredSetup?.eligible?'setup awal lolos filter anti-chase':'belum lolos filter momentum/anti-chase'}`);
+  const reasons=Array.isArray(a.reasons)?a.reasons:[];
+  if(reasons.length)checks.push(`Faktor yang perlu diperiksa: ${reasons.slice(0,4).join('; ')}`);
+  if(!dataFresh)why.push(isRecovery?'Data REST recovery sudah usang; tunggu pembaruan data':'Status koneksi belum LIVE atau REST belum segar');
+  if(a.regime==='EXTREME VOLATILITY'){why.push('NO-TRADE GUARD: volatilitas ekstrem; hindari entry baru');} 
+  if(!scoreOk)why.push(`Skor setup ${Math.round(score)}/100; ambang kandidat 42`);
+  if(!setupReady)why.push(scoredSetup?.reason||'Setup momentum awal belum memenuhi filter');
+  const oscConflict=!!(osc.ready&&osc.direction!=='NEUTRAL'&&osc.direction!==bias&&Math.abs(Number(osc.delta)||0)>=2);
+  if(oscConflict)why.push(`Konflik indikator: setup ${bias}, BB/oscillator ${osc.direction}; tunggu keselarasan`);
+  // Critical consistency guard: Final Signal must never say BUY/SELL while the primary engine says NO TRADE.
+  if(dataFresh&&scoreOk&&setupReady&&a.regime!=='EXTREME VOLATILITY'&&!oscConflict)signal=bias==='LONG'?'BUY':'SELL';
+ }
+ badge.textContent=signal==='BUY'?(aligned?'BUY ▲ · LONG':'BUY ▲ · LONG · CEK RISIKO'):signal==='SELL'?(aligned?'SELL ▼ · SHORT':'SELL ▼ · SHORT · CEK RISIKO'):'WAIT · JANGAN ENTRY';
+ badge.style.color=signal==='BUY'?'#19d59a':signal==='SELL'?'#ff657a':'#f4b942';
+ $('#finalSignalBias').textContent=bias;
+ $('#finalSignalBias').style.color=bias==='LONG'?'#19d59a':bias==='SHORT'?'#ff657a':'#f4b942';
+ $('#finalSignalScore').textContent=`${Math.round(score)}/100`;
+ $('#finalSignalScore').title=`Skor setup awal candle ${tfLabel} tertutup; minimum 48 untuk kandidat awal. Forecast pendukung, bukan syarat mutlak. Bukan jaminan profit.`;
+ if(oscEl)oscEl.title='Skor dukungan relatif arah dari Bollinger + RSI + MACD + StochRSI; bukan probabilitas menang. Skor lebih tinggi berarti lebih banyak dukungan indikator untuk arah yang ditampilkan.';
+ $('#finalSignalConfirm').textContent=forecastSide?`${forecastSide} · ${aligned?'SELARAS':'BERLAWANAN'}`:'BELUM ADA';
+ $('#finalSignalConfirm').style.color=aligned?'#19d59a':'#f4b942';
+ reason.textContent=(signal==='BUY'||signal==='SELL')?`Data segar dan momentum awal ${bias} memenuhi filter anti-chase. ${aligned?`Forecast ${tfLabel} selaras.`:'PERINGATAN: forecast tidak selaras/tersedia; sinyal lebih berisiko.'} BB/oscillator: ${osc.ready?osc.bb+' · '+osc.direction+' · '+osc.detail:osc.text}. Tetap verifikasi SL/risiko.`:(why.join(' · ')||`Menunggu konfirmasi ${tfLabel}.`)+(osc.ready?` · BB/oscillator: ${osc.bb} · ${osc.direction} · ${osc.detail}`:'');
+ const checkEl=$('#finalSignalChecks');if(checkEl){checkEl.innerHTML=checks.map(x=>`<div>${x.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>`).join('');checkEl.style.borderColor=signal==='WAIT'?'#6c5425':'#1e6b52';}
+ const posEl=$('#finalSignalPosition');if(posEl){if(position)posEl.textContent=`Posisi aktif: ${position.side||position.positionSide||'TERBUKA'} ${position.symbol||symbol}. Sinyal ini tidak otomatis menutup atau membalik posisi.`;else posEl.textContent='Tidak ada posisi aktif.';}
+}
+function runAutoPaperTrade(){
+ const btn=$('#tradeModeToggle'),help=$('#tradeModeHelp');
+ if(btn){btn.textContent=autoTradeMode==='auto'?'AUTO TRADE: ON · PAPER':'AUTO TRADE: OFF · MANUAL';btn.classList.toggle('active',autoTradeMode==='auto');btn.classList.toggle('buy',autoTradeMode==='auto');}
+ if(help)help.textContent=autoTradeMode==='auto'?'AUTO PAPER aktif: menilai candle live pada fase awal, membatalkan entry terlambat/berlawanan, hanya satu posisi, dan risk guard aktif.':'Manual entry aktif. Auto entry hanya tersedia pada PAPER; tidak mengirim order sungguhan.';
+ if(autoTradeMode!=='auto'||mode!=='paper'||killed||autoEntryBusy||hasValidPaperPosition())return;
+ const data=String($('#wickDataStatus')?.textContent||'');if(!data.startsWith('LIVE'))return;
+ if(!(Number(livePrice)>0&&Date.now()-Number(lastWsTickerAt||0)<8000))return;
+ const tf=normalizeTf(chartInterval),src=(Array.isArray(entryCandles)&&entryCandles.length>=36?entryCandles:candles).map(x=>({...x}));
+ if(src.length<36)return;
+ const live=src.at(-1);live.close=Number(livePrice);live.high=Math.max(Number(live.high)||Number(livePrice),Number(livePrice));live.low=Math.min(Number(live.low)||Number(livePrice),Number(livePrice));
+ const candidate=scoreEarlyPair(src);
+ if(!candidate?.eligible||!candidate.fresh||candidate.extension>=0.85)return;
+ const side=candidate.bias==='LONG'?'BUY':candidate.bias==='SHORT'?'SELL':'';if(!side)return;
+ // Recheck direction and displacement at the exact moment of entry.
+ const liveMove=(Number(live.close)-Number(live.open))/(Number(candidate.analysis?.A)||1);
+ if((side==='BUY'&&liveMove<=0)||(side==='SELL'&&liveMove>=0)||Math.abs(liveMove)>0.45)return;
+ const key=[symbol,tf,live.time,side].join(':');if(key===autoEntryLastKey)return;
+ const guardReasons=guard();if(guardReasons.length){$('#engineStatus').textContent='AUTO WAIT · '+guardReasons.slice(0,2).join(' · ');return;}
+ autoEntryLastKey=key;autoEntryBusy=true;
+ log(`AUTO PAPER EARLY CHECK · ${side} ${symbol} · ${tf.toUpperCase()} · score ${candidate.score} · candle age ${(Math.max(0,nowMarketMs()/1000-Number(live.time||0))/Math.max(60,intervalSec())*100).toFixed(0)}% · signal age ${Number.isFinite(candidate.signalAgeCandles)?candidate.signalAgeCandles:'current'} candle · move ${liveMove.toFixed(2)} ATR`);
+ Promise.resolve(submitOrder(side,{automatic:true,earlyCandidate:candidate})).catch(e=>log('AUTO PAPER error: '+e.message)).finally(()=>{autoEntryBusy=false;});
+}
+
+function updateUI(){updateClockWib();const mtf=$('#marketIntelTf');if(mtf)mtf.textContent=(TF_LABEL&&TF_LABEL[normalizeTf(chartInterval)])||String(chartInterval||tf||'15M').toUpperCase();let a=analyze();if(!a)return;const ts=timeSignalData();if(ts){showEntryNotice(ts);evaluateExitWarning(ts);const se=$('#timeSignal'),te=$('#timeEntry');if(se){se.textContent=`${(TF_LABEL&&TF_LABEL[normalizeTf(chartInterval)])||normalizeTf(chartInterval)} ${ts.side} · ${Math.round(ts.score)}/100`;se.className='tag '+(ts.side==='BUY'?'up':ts.side==='SELL'?'down':'yellow')}if(te){const ec=(entryCandles.length?entryCandles:candles).at(-1),secs=intervalSec();let n=Math.max(0,Math.floor(((ec?.time||a.c.time)+secs)-nowMarketMs()/1000));te.textContent=`${(TF_LABEL&&TF_LABEL[normalizeTf(chartInterval)])||normalizeTf(chartInterval)} NEXT ${Math.floor(n/60)}:${String(n%60).padStart(2,'0')}`;}}const displayPrice=livePrice||a.c.close;$('#lastPrice').textContent=fmtP(displayPrice);$('#ohlc').textContent=`O ${fmtP(a.c.open)} · H ${fmtP(a.c.high)} · L ${fmtP(a.c.low)} · C ${fmtP(a.c.close)}`;$('#candleDir').textContent=a.bull?'CANDLE BULLISH':a.bear?'CANDLE BEARISH':'DOJI';$('#candleDir').className='tag '+(a.bull?'up':a.bear?'down':'yellow');$('#ema').textContent=fmtP(a.e);$('#confidence').textContent=a.score.toFixed(0)+'%';$('#confidenceBar').style.width=a.score+'%';$('#bias').textContent=a.bias;$('#bias').className=a.bias==='LONG'?'up':a.bias==='SHORT'?'down':'yellow';$('#regime').textContent='REGIME '+a.regime;$('#noTrade').textContent=a.allowed?'TRADE CHECK ✓':'NO TRADE';$('#noTrade').className='tag '+(a.allowed?'up':'down');const wf=forecastFromLastWick();renderWickForecast();renderFinalSignal();runAutoPaperTrade();$('#reason').textContent=`S/R ${fmtP(a.support)} / ${fmtP(a.resistance)} · ATR ${fmtP(a.A)} · Volume x${a.vol.toFixed(2)} · Wick U ${a.wU.toFixed(2)} / L ${a.wL.toFixed(2)} · ${wf?wf.direction+' '+wf.strength+' ('+((TF_LABEL&&TF_LABEL[normalizeTf(chartInterval)])||normalizeTf(chartInterval))+')':'WICK: menunggu data '+((TF_LABEL&&TF_LABEL[normalizeTf(chartInterval)])||normalizeTf(chartInterval))}`;$('#engineScore').textContent=a.score.toFixed(0);$('#guardReasons').innerHTML=a.reasons.length?a.reasons.map(x=>`<div>⚠ ${x}</div>`).join(''):'<div class="up">✓ Guard conditions clear.</div>';let rem=a.c.time+intervalSec()-nowMarketMs()/1000;const remain=Math.max(0,Math.floor(rem)); const mm=Math.floor(remain/60), ss=remain%60; $('#candleTimer').textContent=`CLOSE ${mm}:${String(ss).padStart(2,'0')} · WIB`;let slPct=Number($('#slPct').value)/100,rr=Number($('#rr').value);let sl=a.bias==='SHORT'?a.c.close*(1+slPct):a.c.close*(1-slPct),tp=a.bias==='SHORT'?a.c.close*(1-slPct*rr):a.c.close*(1+slPct*rr);$('#slOut').textContent=fmtP(sl);$('#tpOut').textContent=fmtP(tp);if(hasValidPaperPosition()&&mode==='paper')updatePosition(displayPrice);else if(mode==='paper')updatePaperAccount(0);syncPaperStateUI(a);renderIndicatorPanel();updateBtHeader()}
+function initChart(){
+ const host=$('#chart');
+ if(!host)return;
+ try{
+  chart=new CanvasChart(host,{timeZone:'Asia/Jakarta'});
+  series=chart.series;
+  emaSeries=chart.emaSeries;
+  $('#conn').textContent='CHART READY · 15M · CANVAS · WIB';
+ }catch(e){
+  $('#conn').textContent='CHART ERROR';
+  log('Chart engine error: '+e.message);
+ }
+}
+function redraw(){
+ if(!candles.length)return;
+ try{
+  if(chart){
+   chart.setCandles(candles);
+   chart.setEMA(ema(candles.map(c=>c.close)));
+   chart.setPosition(paperPos&&hasValidPaperPosition()?paperPos:null);
+   chart.setMarkers(tradeMarkers.filter(m=>m&&m.symbol===symbol));
+   if(srActive)chart.setSR(sr(candles)); else chart.setSR(null);
+   chart.fitContent();
+  }
+ }catch(e){log('Chart render error: '+e.message)}
+ updateUI();
+}
+let wsReconnectTimer=null, wsWatchdogTimer=null, realtimeFallbackTimer=null, wsGeneration=0, lastWsKlineAt=0, lastWsTickerAt=0, lastWsSource='NONE', lastRestSyncAt=0, lastRestKlineTime=0, restBusy=false, marketSeq=0, livePrice=0, liveMarkPrice=0, livePriceRaf=0;
+function cacheKey(s=symbol){return `ilhamMarketCandles:${marketProvider}:${s}:${normalizeTf(chartInterval)}`}
+function saveCandleCache(s=symbol){try{if(candles.length>=30)localStorage.setItem(cacheKey(s),JSON.stringify({savedAt:Date.now(),candles:candles.slice(-150)}))}catch{}}
+function loadCandleCache(s=symbol){try{const x=JSON.parse(localStorage.getItem(cacheKey(s)||'')||'null');if(!x||!Array.isArray(x.candles)||x.candles.length<30)return false;const age=Date.now()-Number(x.savedAt||0);if(age>12*60*60*1000)return false;candles=x.candles.map(c=>({...c,time:Number(c.time)})).filter(c=>[c.time,c.open,c.high,c.low,c.close,c.volume].every(Number.isFinite)).slice(-150);redraw();return candles.length>=30}catch{return false}}
+async function loadEntryCandles(targetSymbol=symbol, gen=symbolGeneration){
+ try{const activeTf=normalizeTf(chartInterval),label=(TF_LABEL&&TF_LABEL[activeTf])||activeTf.toUpperCase();const next=await fetchBybitKlines(targetSymbol,150,activeTf);if(gen!==symbolGeneration||targetSymbol!==symbol)return false;if(next.length<35)throw new Error(`Entry ${label} history kurang dari 35 candle`);entryCandles=next.slice(-150);return true;}
+ catch(e){if(gen===symbolGeneration&&targetSymbol===symbol)log('Entry '+((TF_LABEL&&TF_LABEL[normalizeTf(chartInterval)])||normalizeTf(chartInterval))+' history error: '+e.message);return false;}
+}
+function applyEntryKline(k,targetSymbol=symbol,gen=symbolGeneration){
+ if(gen!==symbolGeneration||targetSymbol!==symbol)return false;
+ const c={time:Math.floor(Number(k.t)/1000),open:+k.o,high:+k.h,low:+k.l,close:+k.c,volume:+k.v};
+ if(![c.time,c.open,c.high,c.low,c.close,c.volume].every(Number.isFinite))return false;
+ const i=entryCandles.findIndex(x=>x.time===c.time);if(i>=0)entryCandles[i]=c;else entryCandles.push(c);
+ entryCandles.sort((a,b)=>a.time-b.time);if(entryCandles.length>150)entryCandles=entryCandles.slice(-150);return true;
+}
+async function loadCandles(targetSymbol=symbol, gen=symbolGeneration){
+ let last='unknown';
+ for(let attempt=1;attempt<=2;attempt++){
+  try{
+   const next=await fetchMarketKlines(targetSymbol,150,chartInterval);
+   if(next.length<30)throw new Error(`Candle ${TF_LABEL[normalizeTf(chartInterval)]||chartInterval} kurang dari 30 bar`);
+   if(gen!==symbolGeneration||targetSymbol!==symbol)return false;
+   candles=next.slice(-150); lastRestKlineTime=candles.at(-1)?.time||0; saveCandleCache(targetSymbol); redraw();
+   $('#conn').textContent=`${marketProvider} HISTORY · ${marketSource} · ${TF_LABEL[normalizeTf(chartInterval)]||chartInterval}`; return true;
+  }catch(e){last=e.message;if(gen!==symbolGeneration||targetSymbol!==symbol)return false;await new Promise(r=>setTimeout(r,700*attempt));}
+ }
+ if(gen===symbolGeneration&&targetSymbol===symbol){
+   if(loadCandleCache(targetSymbol)){$('#conn').textContent=`STALE ${marketProvider} HISTORY · WAITING MARKET`;log(`History unavailable · cached ${targetSymbol} candles shown temporarily`);return true;}
+   log(`History unavailable · ${last}`); return false;
+ }
+ return false;
+}
+function applyLiveKline(k,targetSymbol=symbol,gen=symbolGeneration,source='ws'){
+ if(gen!==symbolGeneration||targetSymbol!==symbol)return false;
+ const c={time:Math.floor(Number(k.t)/1000),open:+k.o,high:+k.h,low:+k.l,close:+k.c,volume:+k.v};
+ if(![c.time,c.open,c.high,c.low,c.close,c.volume].every(Number.isFinite))return false;
+ const current=candles.at(-1);
+ // WebSocket owns the active candle. REST is recovery-only and may never
+ // overwrite the active candle while a healthy WS stream is delivering ticks.
+ if(source==='rest' && current && c.time===current.time && ws&&ws.readyState===1 && lastWsKlineAt && Date.now()-lastWsKlineAt<8000) return false;
+ // Never let an older REST response roll the chart backwards.
+ if(source==='rest' && current && c.time<current.time) return false;
+ const i=candles.findIndex(x=>x.time===c.time);
+ if(i>=0)candles[i]=c; else candles.push(c);
+ candles.sort((a,b)=>a.time-b.time);
+ if(candles.length>150)candles=candles.slice(-150);
+ lastRestKlineTime=Math.max(lastRestKlineTime,c.time);
+ saveCandleCache(targetSymbol);
+ if(series)series.update({time:c.time,open:c.open,high:c.high,low:c.low,close:c.close});
+ const ev=ema(candles.map(x=>x.close)).at(-1);
+ if(emaSeries&&Number.isFinite(ev))emaSeries.update({time:c.time,value:ev});
+ updateUI(); renderTradeVisuals();
+ if((mode==='paper'||mode==='demo')&&auto&&!killed&&!hunterBusy){clearTimeout(window.__momentumScanTimer);window.__momentumScanTimer=setTimeout(()=>scan().catch(()=>{}),900);}
+ return true;
+}
+function setRealtimeStatus(extra=''){
+ const wsLive=!!(ws&&ws.readyState===1);
+ const wsFresh=!!(lastWsKlineAt&&Date.now()-lastWsKlineAt<5000);
+ const age=lastRestSyncAt?Math.max(0,Date.now()-lastRestSyncAt):null;
+ const fresh=age!==null&&age<4000;
+ $('#conn').textContent=fresh
+   ? `${marketProvider} REALTIME · REST SYNC${wsLive?' + WS':''}${extra?' · '+extra:''}`
+   : (wsFresh?`${marketProvider} WS LIVE · REST FALLBACK READY`:(wsLive?`${marketProvider} WS CONNECTED · WAITING TICK`:`${marketProvider} REST RECONNECTING`));
+}
+function scheduleWsReconnect(gen,targetSymbol){
+ clearTimeout(wsReconnectTimer);
+ wsReconnectTimer=setTimeout(()=>{if(gen===wsGeneration&&gen===symbolGeneration&&targetSymbol===symbol)connectWS(targetSymbol,gen)},1200);
+}
+function connectWS(targetSymbol=symbol,gen=symbolGeneration){
+ const wsGen=++wsGeneration;clearTimeout(wsReconnectTimer);clearInterval(wsWatchdogTimer);try{ws?.close()}catch{};lastWsKlineAt=0;lastWsTickerAt=0;livePrice=0;liveMarkPrice=0;const klineStream=`kline.${tfApi()}.${targetSymbol.toUpperCase()}`,entryStream=klineStream,tickerStream=`tickers.${targetSymbol.toUpperCase()}`;lastWsSource='BYBIT LINEAR';$('#conn').textContent=`BYBIT WS CONNECTING · ${lastWsSource} · TICKER LIVE + KLINE`;
+ try{ws=new WebSocket(BYBIT_WS);ws.onopen=()=>{if(wsGen!==wsGeneration||gen!==symbolGeneration)return;ws.send(JSON.stringify({op:'subscribe',args:[...new Set([klineStream,entryStream,tickerStream])]}));$('#conn').textContent='BYBIT WS CONNECTED · WAITING FOR TICKER/KLINE'};ws.onmessage=ev=>{if(wsGen!==wsGeneration||gen!==symbolGeneration)return;try{const m=JSON.parse(ev.data);if((m.topic===klineStream||m.topic===entryStream)&&Array.isArray(m.data)&&m.data[0]){const q=m.data[0];if(m.topic===entryStream)applyEntryKline({t:q.start,o:q.open,h:q.high,l:q.low,c:q.close,v:q.volume},targetSymbol,gen);if(m.topic===klineStream){lastWsKlineAt=Date.now();const ok=applyLiveKline({t:q.start,o:q.open,h:q.high,l:q.low,c:q.close,v:q.volume},targetSymbol,gen,'ws');if(ok)setRealtimeStatus(lastWsSource)}}else if(m.topic===tickerStream&&m.data){const q=Array.isArray(m.data)?m.data[0]:m.data;const px=Number(q.lastPrice||q.markPrice||0),mark=Number(q.markPrice||q.lastPrice||0);if(px>0){livePrice=px;liveMarkPrice=mark;lastWsTickerAt=Date.now();if(lastWsKlineAt&&Date.now()-lastWsKlineAt<12000)setRealtimeStatus(lastWsSource);else $('#conn').textContent='BYBIT TICKER LIVE · KLINE WAITING / REST FALLBACK';requestLivePnL();}}}catch{}};ws.onerror=()=>{if(wsGen===wsGeneration)$('#conn').textContent='BYBIT WS ERROR · TICKER/REST FALLBACK'};ws.onclose=()=>{if(wsGen===wsGeneration){clearInterval(wsWatchdogTimer);$('#conn').textContent='BYBIT WS RECONNECTING · TICKER + REST';scheduleWsReconnect(gen,targetSymbol)}};wsWatchdogTimer=setInterval(()=>{if(wsGen!==wsGeneration||gen!==symbolGeneration)return;if(ws?.readyState===1&&lastWsKlineAt&&Date.now()-lastWsKlineAt>12000){$('#conn').textContent='BYBIT WS STALE · RECOVERY READY';try{ws.close()}catch{}}},2000);clearInterval(realtimeFallbackTimer);realtimeFallbackTimer=setInterval(()=>{if(gen===symbolGeneration&&targetSymbol===symbol)reconcileRealtime().catch(()=>{})},5000)}catch(e){$('#conn').textContent='BYBIT WS FAILED · REST SYNC ACTIVE';scheduleWsReconnect(gen,targetSymbol)}}
+function requestLivePnL(){if(livePriceRaf)return;livePriceRaf=requestAnimationFrame(()=>{livePriceRaf=0;const px=livePrice||analyze()?.c?.close||paperPos?.entry||0;if(px>0){$('#lastPrice').textContent=fmtP(px);if(mode==='paper'&&hasValidPaperPosition())updatePosition(px);else if(mode==='paper')updatePaperAccount(0);if(mode==='demo')updateDemoLiveUnrealized(liveMarkPrice||px);}})}
+function demoPnlForPosition(p){if(!p)return 0;const exchangeUpl=Number(p.unrealisedPnl);const entry=Number(p.avgPrice||0),qty=demoPositionQty(p),dir=demoPositionSide(p)==='BUY'?1:-1;const mark=p.symbol===symbol&&Number(liveMarkPrice)>0?Number(liveMarkPrice):Number(p.markPrice||0);if(entry>0&&qty>0&&mark>0)return (mark-entry)*qty*dir*IDR;return (Number.isFinite(exchangeUpl)?exchangeUpl:0)*IDR}
+function updateDemoLiveUnrealized(price){const p=currentDemoPosition();if(!p)return;const upl=demoPnlForPosition(p),side=demoPositionSide(p);$('#unrealized').textContent=fmtIDR(upl);$('#perfLive').textContent=`Posisi ${side} ${p.symbol} · Entry ${fmtTradeP(Number(p.avgPrice||0))} · Unrealized ${fmtIDR(upl)}${p.symbol===symbol&&Number(price)>0?' · LIVE':''}`;const grids=$$('#position .grid3');const pnlEl=grids[1]?.querySelectorAll('.metric')[1]?.querySelector('b');if(pnlEl){pnlEl.textContent=fmtIDR(upl);pnlEl.className=upl>=0?'up':'down';}return upl}
+
+async function reconcileRealtime(){
+ if(restBusy||!candles.length)return;
+ // REST is deliberately NOT polled continuously. It is only a recovery path
+ // when the WebSocket is disconnected or has stopped delivering kline updates.
+ const wsHealthy=!!(ws&&ws.readyState===1&&lastWsKlineAt&&Date.now()-lastWsKlineAt<8000);
+ if(wsHealthy)return;
+ const targetSymbol=symbol,gen=symbolGeneration,seq=++marketSeq; restBusy=true;
+ try{
+  const d=marketProvider==='BYBIT'?await fetchBybitKlines(targetSymbol,2,chartInterval):await fetchMarketKlines(targetSymbol,2,chartInterval);
+  if(seq!==marketSeq||gen!==symbolGeneration||targetSymbol!==symbol)return;
+  const k=Array.isArray(d)&&d.length?d[d.length-1]:null; if(!k)throw new Error('Realtime kline kosong');
+  const changed=applyLiveKline({t:k.time,o:k.open,h:k.high,l:k.low,c:k.close,v:k.volume},targetSymbol,gen,'rest');
+  lastRestSyncAt=Date.now();
+  if(changed)setRealtimeStatus(`${marketProvider} · RECOVERY ${new Date(lastRestSyncAt).toLocaleTimeString('id-ID',{hour12:false})}`);
+ }catch(e){if(gen===symbolGeneration&&targetSymbol===symbol)$('#conn').textContent=`${marketProvider} REST RECOVERY ERROR · ${e.message}`;}finally{restBusy=false}
+}
+
+async function switchSymbol(s){
+ if(s===symbol&&candles.length)return;
+ const lockedSymbol=mode==='paper'&&hasValidPaperPosition()?paperPos.symbol:(mode==='demo'?(demoPositions||[]).find(x=>Number(x.size)>0)?.symbol:null);
+ if(lockedSymbol&&s!==lockedSymbol){log(`PAIR SWITCH DITAHAN · posisi ${lockedSymbol} masih aktif; tutup posisi dulu untuk pindah chart.`);$('#scanState').textContent=`POSISI AKTIF · ${lockedSymbol} · CHART TERKUNCI`;return;}
+ const gen=++symbolGeneration;
+ try{drawings.forEach(x=>x.remove?.())}catch{} drawings=[]; tradeMarkers=tradeMarkers.filter(m=>m&&m.symbol===s); clearPositionVisuals();
+ try{ws?.close()}catch{} clearTimeout(wsReconnectTimer); clearInterval(wsWatchdogTimer);
+ symbol=s; candles=[]; $('#symbolTitle').textContent=s; updatePairLossUI(s); $('#conn').textContent='LOADING '+s+' · MARKET DATA'; lastSwitchAt=Date.now(); redraw();
+ const ok=await loadCandles(s,gen);
+ await loadEntryCandles(s,gen);
+ if(!ok||gen!==symbolGeneration||s!==symbol)return;
+ if(chart)chart.fitContent(); renderTradeVisuals(); connectWS(s,gen); updateBtHeader(); loadBtOrderBook(); persist(); log('Pair → '+s+' · '+marketProvider+' '+(TF_LABEL[normalizeTf(chartInterval)]||chartInterval)+' synced');
+}
+function drawSR(){
+ if(!chart)return;
+ srActive=!srActive;
+ chart.setSR(srActive?sr(candles):null);
+}
+function drawClick(ev){
+ // Drawing tools are handled by the canvas engine; keep this handler for compatibility.
+ if(chart&&typeof chart.handleClick==='function')chart.handleClick(ev,tool);
+ if(tool!=='none'){tool='none';$$('[data-tool]').forEach(x=>x.classList.remove('active'));$('[data-tool="none"]').classList.add('active');}
+}
+const PAPER_NET_TARGET_PCT=0.50, PAPER_MAX_RISK_PCT=0.30, PAPER_TRAIL_GIVEBACK_PCT=20;
+function currentPaperPnl(price){if(!hasValidPaperPosition())return 0;const p=paperPos,px=Number(price),dir=p.side==='BUY'?1:-1,raw=(px-p.entry)*p.qty*dir;const feeRate=Math.max(0,Number($('#fee')?.value)||0)/100,slipRate=Math.max(0,Number($('#slippage')?.value)||0)/100;const entryNotional=Math.abs(p.entry*p.qty),exitNotional=Math.abs(px*p.qty);const roundTripFee=(entryNotional+exitNotional)*feeRate;const roundTripSlippage=(entryNotional+exitNotional)*slipRate;return (raw-roundTripFee-roundTripSlippage)*IDR}
+function paperNetTargetIDR(p){return Math.abs(Number(p?.entry||0)*Number(p?.qty||0))*IDR*PAPER_NET_TARGET_PCT/100}
+function paperMaxRiskIDR(p){const planned=Number(p?.risk||0);return Number.isFinite(planned)&&planned>0?planned:Math.abs(Number(p?.entry||0)*Number(p?.qty||0))*IDR*PAPER_MAX_RISK_PCT/100}
+function scoreEarlyPair(cs){
+ // EARLY-MOMENTUM FIX: include the currently forming candle supplied by the live ticker/kline.
+ // Its close is refreshed from the latest price before scoring, so entry can trigger near momentum start, not one candle late.
+ const closed=Array.isArray(cs)?cs:[];
+ if(closed.length<35)return {eligible:false,score:0,bias:'NEUTRAL',reason:'Data candle belum cukup'};
+ const a=analyzeData(closed);if(!a||!Number.isFinite(a.A)||a.A<=0)return {eligible:false,score:0,bias:'NEUTRAL',reason:'Indikator belum siap'};
+ const c=closed.at(-1),prev=closed.at(-2),p3=closed.at(-4),cl=closed.map(x=>x.close),es=ema(cl,20),e=es.at(-1),ePrev=es.at(-4),A=a.A;
+ const distance=(c.close-e)/A,extension=Math.abs(distance),recent=(c.close-p3.close)/A;
+ const avgVol=closed.slice(-21,-1).reduce((sum,x)=>sum+x.volume,0)/20,volRatio=avgVol>0?c.volume/avgVol:1;
+ const range=Math.max(c.high-c.low,Number.EPSILON),bodyPct=Math.abs(c.close-c.open)/range;
+ const prior=closed.slice(-13,-1),priorHigh=Math.max(...prior.map(x=>x.high)),priorLow=Math.min(...prior.map(x=>x.low));
+ const crossUp=prev.close<=es.at(-2)&&c.close>e,crossDown=prev.close>=es.at(-2)&&c.close<e;
+ const upper=(c.high-Math.max(c.open,c.close))/range,lower=(Math.min(c.open,c.close)-c.low)/range;
+ let long=0,short=0;
+ long+=(c.close>e?15:0)+(e>ePrev?12:0)+Math.min(18,Math.max(0,recent*8))+(c.close>c.open?7:0)+(bodyPct>=.35?6:0)+(c.close>priorHigh?15:0)+(volRatio>=1.15?10:volRatio>=.85?5:0)+(crossUp?15:0)+(lower>upper*1.25&&lower>.35?5:0);
+ short+=(c.close<e?15:0)+(e<ePrev?12:0)+Math.min(18,Math.max(0,-recent*8))+(c.close<c.open?7:0)+(bodyPct>=.35?6:0)+(c.close<priorLow?15:0)+(volRatio>=1.15?10:volRatio>=.85?5:0)+(crossDown?15:0)+(upper>lower*1.25&&upper>.35?5:0);
+ const penalty=Math.max(0,extension-.65)*14;long=Math.max(0,long-penalty);short=Math.max(0,short-penalty);
+ const baseBias=long>=short?'LONG':'SHORT';
+ // Add BB(20,2) + RSI/MACD/StochRSI reaction as a secondary confirmation, not a hard requirement.
+ // This avoids requiring every oscillator to align while still penalizing clear counter-momentum.
+ const osc=bbOscillatorReaction(closed);
+ const oscAligned=!!(osc.ready&&osc.direction===baseBias);
+ const oscConflict=!!(osc.ready&&osc.direction!=='NEUTRAL'&&osc.direction!==baseBias&&Math.abs(Number(osc.delta)||0)>=3);
+ if(oscAligned){if(baseBias==='LONG')long+=Math.min(10,4+Math.abs(osc.delta)*2);else short+=Math.min(10,4+Math.abs(osc.delta)*2);}
+ if(oscConflict){if(baseBias==='LONG')long=Math.max(0,long-8);else short=Math.max(0,short-8);}
+ // Unified indicator confluence: MA50 trend, EMA20, Bollinger/RSI/MACD/StochRSI,
+ // S/R proximity, Fibonacci retracement zone, wick rejection, breakout and volume all
+ // influence the same score used by scanner and entry. Visual toggles never disable logic.
+ const sma50=closed.length>=50?closed.slice(-50).reduce((z,x)=>z+Number(x.close),0)/50:null;
+ const priorSma50=closed.length>=55?closed.slice(-55,-5).reduce((z,x)=>z+Number(x.close),0)/50:null;
+ const maBull=Number.isFinite(sma50)&&c.close>sma50&&(!Number.isFinite(priorSma50)||sma50>=priorSma50);
+ const maBear=Number.isFinite(sma50)&&c.close<sma50&&(!Number.isFinite(priorSma50)||sma50<=priorSma50);
+ if(maBull){long+=5;short=Math.max(0,short-2)} if(maBear){short+=5;long=Math.max(0,long-2)}
+ const srData=sr(closed),nearSupport=Math.abs(c.close-Number(srData.support||0))/A<0.45,nearResistance=Math.abs(Number(srData.resistance||0)-c.close)/A<0.45;
+ if(nearSupport&&lower>upper){long+=3} if(nearResistance&&upper>lower){short+=3}
+ const swing=closed.slice(-50),swingHi=Math.max(...swing.map(x=>Number(x.high))),swingLo=Math.min(...swing.map(x=>Number(x.low))),swingRange=swingHi-swingLo;
+ const fibLevels=swingRange>0?[swingHi-swingRange*.382,swingHi-swingRange*.5,swingHi-swingRange*.618]:[];
+ const nearFib=fibLevels.some(level=>Math.abs(c.close-level)/A<0.18);
+ const bias=long>=short?'LONG':'SHORT';
+ if(nearFib){if(bias==='LONG'&&c.close>=prev.close)long+=3;else if(bias==='SHORT'&&c.close<=prev.close)short+=3;}
+ const score=Math.round(Math.max(long,short));
+ // Fresh continuation and pullback entries are both candidates; reject late extensions.
+ const directionalCandle=bias==='LONG'?(c.close>c.open&&recent>0):(c.close<c.open&&recent<0);
+ const pullbackTurn=bias==='LONG'?(lower>upper*1.15&&c.close>prev.close):(upper>lower*1.15&&c.close<prev.close);
+ // EARLY-ENTRY WINDOW: enter in the first 35% of the current candle OR within
+ // the signal candle plus the next two candles. Reconstruct the recent signal from EMA
+ // crosses / fresh pullback turns so a brief missed opening does not force a late chase.
+ const tfSeconds=Math.max(60,Number(intervalSec())||900);
+ const candleAge=Math.max(0,nowMarketMs()/1000-Number(c.time||0));
+ const currentCandleEarly=candleAge<=tfSeconds*0.35;
+ let signalAgeCandles=Infinity;
+ const scanStart=Math.max(1,closed.length-3);
+ for(let i=closed.length-1;i>=scanStart;i--){
+   const ci=closed[i],pi=closed[i-1],ei=es[i],epi=es[i-1];
+   const crossLong=pi.close<=epi&&ci.close>ei;
+   const crossShort=pi.close>=epi&&ci.close<ei;
+   const candleLong=ci.close>ci.open&&ci.close>=pi.close;
+   const candleShort=ci.close<ci.open&&ci.close<=pi.close;
+   const turnLong=candleLong&&(Math.min(ci.open,ci.close)-ci.low)>(ci.high-Math.max(ci.open,ci.close))*1.15;
+   const turnShort=candleShort&&(ci.high-Math.max(ci.open,ci.close))>(Math.min(ci.open,ci.close)-ci.low)*1.15;
+   const matched=bias==='LONG'?(crossLong||turnLong):(crossShort||turnShort);
+   if(matched){signalAgeCandles=(closed.length-1)-i;break;}
+ }
+ const withinTwoCandles=signalAgeCandles<=2;
+ const earlyWindow=currentCandleEarly||withinTwoCandles;
+ const moveFromOpen=Math.abs(Number(c.close)-Number(c.open))/A;
+ const moveNotLate=moveFromOpen<=0.45;
+ const directionalLive=bias==='LONG'?(c.close>c.open&&c.close>=prev.close):(c.close<c.open&&c.close<=prev.close);
+ // Keep the two-candle grace period conditional on live direction, low extension, and a
+ // small current-candle move; never use it to justify chasing an exhausted impulse.
+ const recentSignal=(crossUp&&bias==='LONG')||(crossDown&&bias==='SHORT')||withinTwoCandles;
+ const fresh=(recentSignal||((Math.abs(recent)<0.65)&&directionalLive)||pullbackTurn)&&extension<0.85&&earlyWindow&&moveNotLate;
+ const rejectionAgainst=(bias==='LONG'&&upper>.42&&upper>lower*1.25)||(bias==='SHORT'&&lower>.42&&lower>upper*1.25);
+ const reasons=[];
+ if(extension>=0.85)reasons.push('anti-chase: harga sudah menjauh dari EMA20');
+ if(!earlyWindow)reasons.push('terlambat: sinyal lebih dari 2 candle');
+ if(!moveNotLate)reasons.push('terlambat: gerak candle sudah >0,45 ATR dari open');
+ if(rejectionAgainst)reasons.push('wick rejection berlawanan dengan entry');
+ if(a.regime==='EXTREME VOLATILITY')reasons.push('volatilitas ekstrem');
+ if(volRatio<.55)reasons.push('volume relatif rendah — konfirmasi lebih lemah');
+ if(score<42)reasons.push('skor kandidat di bawah 42');
+ if(!fresh)reasons.push('momentum belum fresh atau entry terlambat');
+ if(oscConflict)reasons.push(`BB/RSI/MACD/StochRSI berlawanan (${osc.direction})`);
+ if(baseBias==='LONG'&&maBear)reasons.push('MA50 menekan arah BUY');
+ if(baseBias==='SHORT'&&maBull)reasons.push('MA50 menekan arah SELL');
+ if(bias==='LONG'&&upper>.58)reasons.push('sumbu atas besar — risiko rejection');
+ if(bias==='SHORT'&&lower>.58)reasons.push('sumbu bawah besar — risiko pantulan');
+ const directionalOk=directionalCandle||pullbackTurn||(bias==='LONG'?recent>0:recent<0)||crossUp||crossDown;
+ const eligible=score>=42&&extension<0.85&&a.regime!=='EXTREME VOLATILITY'&&fresh&&directionalOk&&!oscConflict&&!rejectionAgainst;
+ return {score,bias,analysis:a,earlyScore:score,extension,fresh,eligible,signalAgeCandles:Number.isFinite(signalAgeCandles)?signalAgeCandles:null,oscDirection:osc.direction,oscAligned,oscConflict,maTrend:maBull?'BULLISH':maBear?'BEARISH':'NEUTRAL',nearFib,nearSupport,nearResistance,reason:eligible?'KANDIDAT AWAL · momentum + BB/oscillator diperiksa':reasons.slice(0,2).join(' · ')||'menunggu konfirmasi',closedTime:c.time,change:0,volume:0,upper,lower,volRatio};
+}
+async function scan(){
+ if(hunterBusy)return; hunterBusy=true; $('#scanState').textContent='SCANNING BYBIT…';
+ try{
+  const td=await bybitPublic('/v5/market/tickers',{category:'linear'});
+  const all=(td?.result?.list||[]).filter(x=>/USDT$/.test(x.symbol)&&!x.symbol.includes('_')&&Number(x.turnover24h)>0&&x.symbol!=='USDCUSDT');
+  const sorted=[...all].sort((a,b)=>Math.abs(Number(b.price24hPcnt))-Math.abs(Number(a.price24hPcnt)));
+  const volume=[...all].sort((a,b)=>Number(b.turnover24h)-Number(a.turnover24h));
+  const universe=[...new Map([...volume.slice(0,18),...sorted.slice(0,6),...([...all].sort((a,b)=>Number(b.price24hPcnt)-Number(a.price24hPcnt)).slice(0,5)),...([...all].sort((a,b)=>Number(a.price24hPcnt)-Number(b.price24hPcnt)).slice(0,5)),...(all.filter(x=>x.symbol===symbol))].map(x=>[x.symbol,x])).values()].slice(0,28);
+  const gainers=[...all].sort((a,b)=>Number(b.price24hPcnt)-Number(a.price24hPcnt)).slice(0,5), losers=[...all].sort((a,b)=>Number(a.price24hPcnt)-Number(b.price24hPcnt)).slice(0,5);
+  $('#symbols').innerHTML=universe.map(x=>`<div class="sym ${x.symbol===symbol?'active':''}" data-s="${x.symbol}"><div><b>${x.symbol}</b><div class="muted">Vol ${(Number(x.turnover24h)/1e6).toFixed(1)}M</div></div><b class="${Number(x.price24hPcnt)>=0?'up':'down'}">${Number(x.price24hPcnt)>=0?'+':''}${(Number(x.price24hPcnt)*100).toFixed(2)}%</b></div>`).join('');
+  $$('.sym').forEach(e=>e.onclick=()=>switchSymbol(e.dataset.s));
+  $('#leaders').innerHTML='<div class="muted">Top Gainers</div>'+gainers.map(x=>`<div class="kv"><span>${x.symbol}</span><b class="up">+${(Number(x.price24hPcnt)*100).toFixed(2)}%</b></div>`).join('')+'<div class="muted" style="margin-top:8px">Top Losers</div>'+losers.map(x=>`<div class="kv"><span>${x.symbol}</span><b class="down">${(Number(x.price24hPcnt)*100).toFixed(2)}%</b></div>`).join('');
+
+  // SCANNER SAJA: tidak pernah membuka/menutup order. Trading sepenuhnya manual.
+  if(auto&&!killed&&mode==='paper'&&!hasValidPaperPosition()&&Date.now()-lastSwitchAt>=HUNTER.cooldownMs){
+   // Bounded concurrency protects Bybit rate limits while scanning the highest-liquidity and momentum pairs quickly.
+   const results=Array(universe.length);let scanIndex=0;const worker=async()=>{while(scanIndex<universe.length){const i=scanIndex++,x=universe[i];try{const kd=(await getScannerKlines(x.symbol)).slice().reverse();const cs=kd.map(k=>({time:Math.floor(Number(k[0])/1000),open:+k[1],high:+k[2],low:+k[3],close:+k[4],volume:+k[5]}));
+ // Refresh the current forming candle from the live ticker before scoring. This makes the
+ // candidate reflect current momentum rather than a stale cached kline or 24h leaderboard.
+ const tickerPrice=Number(x.lastPrice);if(cs.length&&tickerPrice>0){const live=cs[cs.length-1];live.close=tickerPrice;live.high=Math.max(live.high,tickerPrice);live.low=Math.min(live.low,tickerPrice);}
+ const scored=scoreEarlyPair(cs);if(scored)results[i]={symbol:x.symbol,...scored,change:Number(x.price24hPcnt)*100,volume:Number(x.turnover24h)};}catch{results[i]=null;}}};await Promise.all(Array.from({length:Math.min(7,universe.length)},worker));
+   const ranked=results.filter(x=>x&&!isPairLossBlocked(x.symbol)&&!(x.symbol===rotateAwaySymbol&&Date.now()<rotateAwayUntil)&&Number(manualPairSkipUntil[x.symbol]||0)<=Date.now()).map(x=>({...x,rankScore:x.score+(x.fresh?8:0)+(x.oscAligned?5:0)-(x.oscConflict?12:0)-(x.extension>0.8?Math.min(16,(x.extension-0.8)*18):0)-(Math.abs(Number(x.change)||0)>12?Math.min(12,(Math.abs(Number(x.change)||0)-12)*0.5):0)+Math.min(4,Math.log10(Math.max(1,x.volume||1))-5)})).sort((a,b)=>(Number(b.eligible)-Number(a.eligible))||b.rankScore-a.rankScore),best=ranked.find(x=>x.eligible)||ranked[0],currentCandidate=ranked.find(x=>x.symbol===symbol),switchEdge=best?best.rankScore-(currentCandidate?.rankScore||0):0;
+  const top=ranked.slice(0,6);$('#scanCandidates').innerHTML=top.length?top.map((x,i)=>`<div class="scan-candidate" data-candidate="${x.symbol}"><div><b>${i+1}. ${x.symbol} · ${x.bias==='LONG'?'BUY/LONG':'SELL/SHORT'}</b><div class="rank">${x.eligible?'SETUP AWAL LAYAK':'BELUM SIAP'} · ${(TF_LABEL&&TF_LABEL[normalizeTf(chartInterval)])||normalizeTf(chartInterval)}</div></div><b class="score" style="color:${x.eligible?'#19d59a':'#f4c15d'}">${x.score}/100</b><div class="meta">${x.reason||'menunggu konfirmasi'} · BB/OSC ${x.oscDirection||'—'} · EMA20 ${x.extension.toFixed(2)} ATR · volume x${Number(x.volRatio||0).toFixed(2)}</div></div>`).join(''):'<div class="muted small">Data scanner belum tersedia. Coba Refresh.</div>';$$('[data-candidate]').forEach(e=>e.onclick=()=>switchSymbol(e.dataset.candidate));
+   const active=mode==='paper'?hasValidPaperPosition():(mode==='demo'?hasValidDemoPosition():false);
+   const activeSymbol=mode==='paper'?paperPos?.symbol:(mode==='demo'?currentDemoPosition()?.symbol:null);
+   const current=active?analyze():null;
+   const currentScore=current?.score||0;
+
+   // Scan across timeframes and automatically move the chart only when there is no open position.
+   if(!active&&await scanCrossTimeframes(universe,active))return;
+
+   // FLEXIBLE AUTO ENTRY: use the scanner's best early-momentum candidate; keep hard risk/SL safeguards.
+   if(active){
+    const holdPnl=mode==='paper'&&paperPos?currentPaperPnl(current?.c?.close||paperPos.entry):mode==='demo'&&currentDemoPosition()?demoPnlForPosition(currentDemoPosition()):0;
+    $('#scanState').textContent=`POSISI AKTIF · ${activeSymbol} · ${currentScore.toFixed(0)} · ${fmtIDR(holdPnl)}`;
+   }else if(best&&best.score>=38&&best.fresh&&best.extension<=1.5&&Date.now()-lastSwitchAt>=Math.min(HUNTER.cooldownMs,2500)){
+    const target=best.symbol, targetBias=best.bias, targetScore=best.score;
+    if(target!==symbol) await switchSymbol(target);
+    const fresh=analyze();
+    // Re-score the newly selected pair using the refreshed chart candles and live ticker.
+    // If momentum already reversed during pair switching, skip this entry instead of chasing.
+    const liveCs=(Array.isArray(entryCandles)&&entryCandles.length>=35?entryCandles:candles).map(k=>({...k}));
+    if(liveCs.length&&Number(livePrice)>0){const lc=liveCs[liveCs.length-1];lc.close=Number(livePrice);lc.high=Math.max(Number(lc.high)||Number(livePrice),Number(livePrice));lc.low=Math.min(Number(lc.low)||Number(livePrice),Number(livePrice));}
+    const liveCandidate=liveCs.length>=35?scoreEarlyPair(liveCs):null;
+    const directionOK=fresh&&liveCandidate?.eligible&&liveCandidate.bias===targetBias&&((targetBias==='LONG'&&Number(livePrice)>=Number(liveCs.at(-1).open))||(targetBias==='SHORT'&&Number(livePrice)<=Number(liveCs.at(-1).open)))&&Date.now()-Number(lastWsTickerAt||0)<12000;
+    if(fresh&&directionOK&&mode==='paper'){
+      const opened=openPaper(targetBias==='LONG'?'BUY':'SELL',fresh);
+      if(opened){$('#scanState').textContent=`AUTO ENTRY ${targetBias==='LONG'?'BUY':'SELL'} · ${target} · ${targetScore}`;log(`AUTO ENTRY PAPER → ${target} ${targetBias} · scanner score ${targetScore}`)}
+      else {$('#scanState').textContent=`ENTRY DITAHAN · ${target} · cek log`;}
+    }else if(fresh&&directionOK&&mode==='demo'){
+      const opened=await submitDemoAuto(targetBias==='LONG'?'BUY':'SELL',fresh);
+      $('#scanState').textContent=opened?`DEMO ENTRY ${targetBias} · ${target}`:`DEMO ENTRY GAGAL · ${target} · cek log`;
+    }else if(best){$('#scanState').textContent=`WAIT CANDLE · ${target} · ${targetBias} · ${targetScore}`;}
+   }else if(best){
+    const ready=ranked.filter(x=>x.eligible).length;$('#scanState').textContent=ready?`${ready} SETUP · BEST ${best.symbol} ${best.score}`:`CANDIDATE ${best.symbol} ${best.score} · MENUNGGU ARAH CANDLE`;
+   }else {$('#scanState').textContent='DATA SCAN BELUM TERSEDIA';$('#scanCandidates').innerHTML='<div class="muted small">Data kline tidak tersedia. Periksa koneksi Bybit/API.</div>';}
+  }else{$('#scanState').textContent='BYBIT SCANNER READY · MANUAL TRADING'}
+ }catch(e){log('Bybit scanner error: '+e.message);$('#scanState').textContent='BYBIT SCANNER ERROR'}finally{hunterBusy=false}
+}
+function hasValidDemoPosition(){return Array.isArray(demoPositions)&&demoPositions.some(x=>Number(x.size)>0)}
+function currentDemoPosition(){return (demoPositions||[]).find(x=>x.symbol===symbol&&Number(x.size)>0)||null}
+function demoPositionSide(p){return String(p?.side||'').toLowerCase()==='buy'?'BUY':'SELL'}
+function demoPositionQty(p){return Math.abs(Number(p?.size||0))}
+async function fetchDemoHistory(){if(mode!=='demo')return;try{const r=await fetch('/api/closed-pnl?limit=100',{cache:'no-store'});const d=await r.json();if(!r.ok)throw Error(d.error||'Closed PnL gagal');demoHistory=(d.list||[]).map(x=>({...x,closedPnlRaw:Number(x.closedPnl),pnl:Number(x.closedPnl||0)*IDR,result:Number(x.closedPnl)>0?'WIN':Number(x.closedPnl)<0?'LOSS':'BREAKEVEN'}));demoSyncAt=Date.now();pairLossStreak={};for(const x of [...demoHistory].reverse()){if(Number(x.closedPnlRaw)<0)pairLossStreak[x.symbol]=(pairLossStreak[x.symbol]||0)+1;else pairLossStreak[x.symbol]=0}renderDemoPerformance();updatePairLossUI(symbol);}catch(e){log('Demo history sync error: '+e.message)}}
+function renderDemoPerformance(){if(mode!=='demo')return;const h=demoHistory||[],wins=h.filter(x=>Number(x.closedPnlRaw??x.closedPnl)>0),losses=h.filter(x=>Number(x.closedPnlRaw??x.closedPnl)<0),be=h.length-wins.length-losses.length,grossWin=wins.reduce((a,x)=>a+x.pnl,0),grossLoss=Math.abs(losses.reduce((a,x)=>a+x.pnl,0));$('#perfTrades').textContent=h.length;$('#perfWin').textContent=(h.length?(wins.length/h.length*100):0).toFixed(1)+'% · BE '+be;$('#perfNet').textContent=fmtIDR(h.reduce((a,x)=>a+x.pnl,0));$('#perfPF').textContent=grossLoss?(grossWin/grossLoss).toFixed(2):'—';$('#perfBest').textContent=fmtIDR(wins.length?Math.max(...wins.map(x=>x.pnl)):0);$('#perfWorst').textContent=fmtIDR(losses.length?Math.min(...losses.map(x=>x.pnl)):0);$('#perfStreak').textContent=(()=>{let n=0;for(const x of h){if(Number(x.closedPnlRaw??x.closedPnl)<0)n++;else break}return n})();const p=currentDemoPosition();$('#perfLive').textContent=p?`BYBIT DEMO ${demoPositionSide(p)} ${p.symbol} · Entry ${fmtTradeP(Number(p.avgPrice))} · Unrealized ${fmtIDR(demoPnlForPosition(p))}`:'BYBIT DEMO · posisi aktif: belum ada';$('#perfHistory').innerHTML=h.slice(0,8).map(x=>{const raw=Number(x.closedPnlRaw??x.closedPnl),result=raw>0?'WIN':raw<0?'LOSS':'BREAKEVEN';return `<div class="log"><b>${x.symbol} ${x.side}</b> · Entry ${fmtTradeP(x.avgEntryPrice)} → Exit ${fmtTradeP(x.avgExitPrice)} · <b>${fmtIDR(x.pnl)}</b> <span class="muted">(${Number.isFinite(raw)?raw.toFixed(6):'—'} USDT)</span> · <b class="${result==='WIN'?'up':result==='LOSS'?'down':'yellow'}">${result}</b> · ${new Date(Number(x.updatedTime||x.createdTime)).toLocaleString('id-ID',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</div>`}).join('')||'Belum ada trade yang ditutup.'}
+function hasValidPaperPosition(){return !!(paperPos&&typeof paperPos==='object'&&paperPos.symbol&&['BUY','SELL'].includes(paperPos.side)&&Number.isFinite(Number(paperPos.entry))&&Number.isFinite(Number(paperPos.qty))&&Number(paperPos.qty)>0&&Number.isFinite(Number(paperPos.sl))&&Number.isFinite(Number(paperPos.tp)))}
+function syncPaperStateUI(a=null){
+  if(!hasValidPaperPosition()){
+    if(paperPos){paperPos=null;persist()}
+    renderPosition();
+    const reasons=a?.reasons||[];
+    const statusEl=$('#engineStatus');
+    if(statusEl){
+      statusEl.className=(killed?'dangerbox':'goodbox');
+      statusEl.textContent=killed?'ENTRY LOCK AKTIF · buka kunci untuk entry manual':(a?.c?'READY · entry manual tersedia · sinyal '+(a.bias||'WAIT')+(reasons.length?' · catatan: '+reasons.slice(0,2).join(', '):''):'MENUNGGU DATA MARKET');
+    }
+    return false;
+  }
+  const p=paperPos;
+  renderPosition();
+  const statusEl=$('#engineStatus');
+  if(statusEl){statusEl.className='warning';statusEl.textContent=`POSISI AKTIF · ${p.side} ${p.symbol} · Entry ${fmtTradeP(p.entry)}`;}
+  return true;
+}
+function guard(){if(killed)return['kill switch aktif'];if(isPairLossBlocked(symbol))return[`PAIR ${symbol} DIHENTIKAN · 3 LOSS BERUNTUN`];if(hasValidPaperPosition()&&Number($('#maxPos').value)<=1)return['sudah ada posisi aktif'];if(dailyPnl<=-(accountEquity*Number($('#dailyLoss').value)/100))return['daily loss limit tercapai'];let a=analyze();return a&&!a.allowed?a.reasons:[]}
+function positionSize(price,sl){let risk=accountEquity*Number($('#risk').value)/100;let dist=Math.abs(price-sl);return dist?risk/dist:Number($('#qty').value)}
+function openPaper(side,forcedAnalysis=null){
+  if(hasValidPaperPosition()){syncPaperStateUI();log(`ENTRY BLOCKED: sudah ada posisi ${paperPos.side} ${paperPos.symbol}`);return false}
+  if(dailyPnl<=-(accountEquity*Number($('#dailyLoss').value)/100)){log('ENTRY BLOCKED: daily loss limit tercapai');alert('Entry diblokir: daily loss limit tercapai.');return false}
+  let a=forcedAnalysis||analyze();
+  // Keep manual paper-entry analysis aligned with Final Signal on the selected timeframe.
+  if(!forcedAnalysis&&mode==='paper'&&Array.isArray(entryCandles)&&entryCandles.length>=36){
+    const setupTf=scoreEarlyPair(entryCandles);
+    if(setupTf?.analysis?.c)a=setupTf.analysis;
+  }
+  if(!a||!a.c){log('ENTRY BLOCKED: market data belum siap');alert('Market data belum siap. Tunggu chart realtime.');return false}
+  side=String(side).toUpperCase();
+  if(!['BUY','SELL'].includes(side)){log('ENTRY BLOCKED: side tidak valid');return false}
+  let risk=HARD_RISK_PCT/100,sp=Number($('#slPct').value)/100,rr=Number($('#rr').value),tickerFresh=Number(livePrice)>0&&Date.now()-Number(lastWsTickerAt||0)<12000,p=(mode==='paper'&&tickerFresh)?Number(livePrice):a.c.close,sl=side==='BUY'?p*(1-sp):p*(1+sp),tp=side==='BUY'?p*(1+sp*rr):p*(1-sp*rr),leverage=mode==='paper'?paperLeverage():Number($('#lev').value)||1;
+  // PAPER MANUAL SIZE: risk is fixed to the 0.20% hard-loss budget, not margin × leverage.
+  const riskMoney=Math.max(1,(Number(accountEquity)+Number(paperPnl))*HARD_RISK_PCT/100);
+  const exitRef=sl, feePct=Number($('#fee').value)/100, slipPct=Number($('#slippage').value)/100;
+  const riskPerUnit=(Math.abs(p-sl)+(p+exitRef)*feePct+exitRef*slipPct)*IDR;
+  const riskQty=riskPerUnit>0?riskMoney/riskPerUnit:0;
+  const manualQty=Math.max(0.000001,Number($('#qty').value)||0.001);
+  const qty=mode==='paper'?riskQty:manualQty;
+  const notional=qty*p*IDR;
+  const margin=mode==='paper'?notional/Math.max(1,leverage):0;
+  if(mode==='paper'&&margin>accountEquity+paperPnl){log(`ENTRY BLOCKED: margin ${fmtIDR(margin)} melebihi available balance`);syncPaperStateUI(a);return false;}
+  if((side==='BUY'&&(sl>=p||tp<=p))||(side==='SELL'&&(sl<=p||tp>=p))){log('ENTRY BLOCKED: SL/TP tidak valid');$('#engineStatus').className='dangerbox';$('#engineStatus').textContent='NO TRADE · SL/TP tidak valid';return false}
+  paperPos={symbol,side,entry:p,qty,sl,tp,initialSL:sl,be:false,partial:false,trail:false,opened:Date.now(),risk:riskMoney,margin,leverage,notional,entryCandleTime:a.c.time,entryScore:a.score,entryBias:a.bias,peakPnl:0,autoTrailPeak:0,autoTrailActive:false,negativeScans:0};
+  addTradeMarker('entry',paperPos); renderTradeVisuals(); persist(); syncPaperStateUI(a); log(`MANUAL PAPER ${side} ${symbol} · ENTRY ${fmtTradeP(p)} · SL awal ${fmtTradeP(sl)} · profit guard aktif setelah target awal, lalu BE + giveback 20% tanpa TP tetap · SCORE ${a.score.toFixed(0)}/100 · ANALISIS ${mode==='paper'&&entryCandles.length>=36?((TF_LABEL&&TF_LABEL[normalizeTf(chartInterval)])||normalizeTf(chartInterval))+' CLOSED':'CHART TF'}${tickerFresh?' · TICKER LIVE':' · HARGA CANDLE'}`); return true;
+}
+function renderPosition(pnl=0){if(!hasValidPaperPosition()){$('#position').innerHTML='<div class="muted">Tidak ada posisi.</div>';return}let p=paperPos;$('#position').innerHTML=`<div class="grid3"><div class="metric"><span class="muted">Side</span><b class="${p.side==='BUY'?'up':'down'}">${p.side} ${p.symbol}</b></div><div class="metric"><span class="muted">Entry</span><b>${fmtTradeP(p.entry)}</b></div><div class="metric"><span class="muted">Qty</span><b>${p.qty.toFixed(6)}</b></div></div><div class="grid3" style="margin-top:7px"><div class="metric"><span class="muted">Margin</span><b>${fmtIDR(p.margin||0)}</b></div><div class="metric"><span class="muted">Leverage</span><b>${Number(p.leverage||1)}x</b></div><div class="metric"><span class="muted">Position Size</span><b>${fmtIDR(p.notional||0)}</b></div></div><div class="grid3" style="margin-top:7px"><div class="metric"><span class="muted">SL</span><b>${fmtTradeP(p.sl)}</b></div><div class="metric"><span class="muted">TP</span><b>${p.autoTrailActive?'TANPA BATAS · TRAILING':fmtTradeP(p.tp)}</b></div><div class="metric"><span class="muted">PnL</span><b class="${pnl>=0?'up':'down'}">${fmtIDR(pnl)}</b></div></div><div class="kv"><span>BE / Partial / Trail</span><b>${p.be?'ON':'OFF'} / ${p.partial?'ON':'OFF'} / ${p.trail?'ON':'OFF'}</b></div><div class="kv"><span>Peak Profit / Giveback</span><b>${fmtIDR(p.peakPnl||0)} / ${PAPER_TRAIL_GIVEBACK_PCT}%${p.autoTrailActive?' · PROFIT RUNNER ON':' · menunggu profit target awal'}</b></div>`}
+
+function csvCell(v){const s=String(v??'');return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s}function downloadTradeHistory(){if(mode==='demo'){if(!demoHistory.length){alert('Belum ada history Demo Bybit yang tersedia.');return}const header=['Tanggal','Pair','Side','Entry','Exit','Qty','Leverage','PnL USDT','PnL IDR','Order ID'];const rows=demoHistory.map(x=>[new Date(Number(x.updatedTime||x.createdTime)).toLocaleString('id-ID'),x.symbol,x.side,x.avgEntryPrice,x.avgExitPrice,x.closedSize,x.leverage,Number(x.closedPnl||0).toFixed(8),Number(x.pnl||0).toFixed(2),x.orderId]);const csv='\uFEFF'+[header,...rows].map(r=>r.map(csvCell).join(',')).join('\n');const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`bybit-demo-closed-pnl-${new Date().toISOString().slice(0,10)}.csv`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);return}if(!tradeHistory.length){alert('Belum ada history trade yang bisa di-download.');return}const header=['Tanggal','Pair','Side','Entry','Exit','Qty','Margin IDR','Leverage','PnL IDR','Hasil','Alasan'];const rows=tradeHistory.map(x=>[new Date(x.time).toLocaleString('id-ID'),x.symbol,x.side,x.entry??'',x.exit??'',x.qty??'',x.margin??'',x.leverage??'',Number(x.pnl||0).toFixed(2),x.result,x.reason||'']);const csv='\uFEFF'+[header,...rows].map(r=>r.map(csvCell).join(',')).join('\n');const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`v10-trade-history-${new Date().toISOString().slice(0,10)}.csv`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000)}function downloadTradeJpg(){
+ const rows=(mode==='demo'?demoHistory.map(x=>({time:Number(x.updatedTime||x.createdTime||Date.now()),symbol:x.symbol,side:x.side,entry:x.avgEntryPrice,exit:x.avgExitPrice,pnl:Number(x.closedPnl||0)*IDR,result:Number(x.closedPnl||0)>0?'WIN':Number(x.closedPnl||0)<0?'LOSS':'BREAKEVEN',reason:'BYBIT DEMO'})):tradeHistory).slice().reverse().slice(0,18);
+ const w=1400, rowH=34, h=Math.max(760,330+rows.length*rowH); const cv=document.createElement('canvas');cv.width=w;cv.height=h;const c=cv.getContext('2d');
+ c.fillStyle='#07101a';c.fillRect(0,0,w,h);c.fillStyle='#0d1825';c.fillRect(35,30,w-70,92);
+ c.fillStyle='#f4c44f';c.font='bold 24px Arial';c.fillText('⚡ ILHAM NOVANDI',58,67);c.fillStyle='#e9f0f8';c.font='bold 19px Arial';c.fillText('FUTURES COMMAND CENTER · BYBIT',58,96);
+ c.fillStyle='#7f90a6';c.font='14px Arial';c.fillText(new Date().toLocaleString('id-ID'),w-310,67);c.fillText('PAPER / DEMO · 15M',w-310,94);
+ const stats=[['TOTAL TRADE',mode==='demo'?rows.length:tradeHistory.length],['WIN RATE',mode==='demo'?(rows.length?((rows.filter(x=>x.result==='WIN').length/rows.length)*100).toFixed(1)+'%': '0%'):(tradeHistory.length?((tradeStats.wins/tradeHistory.length)*100).toFixed(1)+'%':'0%')],['NET PNL',fmtIDR(mode==='demo'?demoHistory.reduce((a,x)=>a+Number(x.closedPnl||0)*IDR,0):paperPnl)],['ACTIVE PAIR',symbol]];
+ stats.forEach((x,i)=>{const xx=35+i*332;c.fillStyle='#0d1825';c.fillRect(xx,145,310,86);c.fillStyle='#7f90a6';c.font='12px Arial';c.fillText(x[0],xx+16,169);c.fillStyle='#e9f0f8';c.font='bold 22px Arial';c.fillText(String(x[1]),xx+16,204)});
+ c.fillStyle='#e9f0f8';c.font='bold 16px Arial';c.fillText('TRADE HISTORY',52,270);const cols=[['WAKTU',52],['PAIR',245],['SIDE',470],['ENTRY',600],['EXIT',760],['PNL',920],['HASIL',1080],['ALASAN',1190]];
+ c.fillStyle='#101d2b';c.fillRect(35,290,w-70,34);c.fillStyle='#7f90a6';c.font='bold 11px Arial';cols.forEach(([t,x])=>c.fillText(t,x,312));
+ rows.forEach((r,i)=>{const y=324+i*rowH;if(i%2===0){c.fillStyle='#0a141f';c.fillRect(35,y,w-70,rowH)}c.fillStyle='#c8d3df';c.font='12px Arial';c.fillText(new Date(r.time||Date.now()).toLocaleString('id-ID',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}),52,y+22);c.fillText(String(r.symbol||'-'),245,y+22);c.fillText(String(r.side||'-'),470,y+22);c.fillText(String(r.entry??'-'),600,y+22);c.fillText(String(r.exit??'-'),760,y+22);const pnl=Number(r.pnl||0);c.fillStyle=pnl>=0?'#19d59a':'#ff5c72';c.font='bold 12px Arial';c.fillText(fmtIDR(pnl),920,y+22);c.fillText(String(r.result||'-'),1080,y+22);c.fillStyle='#aab8c7';c.font='11px Arial';c.fillText(String(r.reason||'-').slice(0,30),1190,y+22)});
+ c.fillStyle='#5f7185';c.font='11px Arial';c.fillText('Untuk jurnal/review · bukan jaminan profit',52,h-25);
+ const a=document.createElement('a');a.href=cv.toDataURL('image/jpeg',0.92);a.download=`ilham-novandi-bybit-report-${new Date().toISOString().slice(0,10)}.jpg`;document.body.appendChild(a);a.click();a.remove();
+}
+function renderPerformance(unrealized=0){const n=tradeHistory.length,w=tradeStats.wins,l=tradeStats.losses,be=Math.max(0,n-w-l),net=paperPnl,grossWin=tradeHistory.filter(x=>x.pnl>0).reduce((a,x)=>a+x.pnl,0),grossLoss=Math.abs(tradeHistory.filter(x=>x.pnl<0).reduce((a,x)=>a+x.pnl,0));$('#perfTrades').textContent=n;$('#perfWin').textContent=(n?((w/n)*100).toFixed(1):'0')+'% · BE '+be;$('#perfNet').textContent=fmtIDR(net);$('#perfPF').textContent=grossLoss?(grossWin/grossLoss).toFixed(2):'—';$('#perfBest').textContent=fmtIDR(n?Math.max(...tradeHistory.map(x=>x.pnl)):0);$('#perfWorst').textContent=fmtIDR(n?Math.min(...tradeHistory.map(x=>x.pnl)):0);$('#perfStreak').textContent=lossStreak;$('#perfLive').textContent=hasValidPaperPosition()?`Posisi ${paperPos.side} ${paperPos.symbol} · Entry ${fmtTradeP(paperPos.entry)} · Unrealized ${fmtIDR(unrealized)}`:'Posisi aktif: belum ada';if(n){const rows=tradeHistory.slice(-8).reverse().map(x=>`<div class="log"><b>${x.symbol} ${x.side}</b> · Entry ${fmtTradeP(x.entry??0)} → Exit ${fmtTradeP(x.exit??0)} · <b>${fmtIDR(x.pnl)}</b> · ${Number(x.pnl)>0?'WIN':Number(x.pnl)<0?'LOSS':'BREAKEVEN'} · ${x.reason||''} · ${new Date(x.time).toLocaleString('id-ID',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</div>`).join('');$('#perfHistory').innerHTML=rows}else $('#perfHistory').textContent='Belum ada trade yang ditutup.'}
+function paperMargin(){return Math.max(0,Number($('#margin').value)||DEFAULT_PAPER_MARGIN_IDR)}
+function paperLeverage(){return Math.max(1,Number($('#lev').value)||DEFAULT_LEVERAGE)}
+function paperNotional(){return paperMargin()*paperLeverage()}
+function renderPaperOrderPreview(){const m=paperMargin(),lev=paperLeverage(),notional=paperNotional();$('#marginOut').textContent=fmtIDR(m);$('#positionSizeOut').textContent=fmtIDR(notional);if(hasValidPaperPosition())return;let a=analyze();if(a){let risk=HARD_RISK_PCT/100,sp=Number($('#slPct').value)/100,rr=Number($('#rr').value),p=a.c.close,sl=a.bias==='SHORT'?p*(1+sp):p*(1-sp),tp=a.bias==='SHORT'?p*(1-sp*rr):p*(1+sp*rr);$('#slOut').textContent=fmtP(sl);$('#tpOut').textContent=fmtP(tp)}}
+function updatePaperAccount(unrealized=0){paperPnl=tradeHistory.reduce((a,t)=>a+Number(t.pnl||0),0);const balance=accountEquity+paperPnl,usedMargin=hasValidPaperPosition()?Number(paperPos.margin||0):0;$('#acctStatus').textContent='PAPER';$('#balance').textContent=fmtIDR(balance);$('#available').textContent=fmtIDR(Math.max(0,balance-usedMargin));$('#unrealized').textContent=fmtIDR(unrealized);$('#paperPnl').textContent=fmtIDR(paperPnl);renderPerformance(unrealized)}
+function aSafeBear(){const a=analyze();return !!(a&&a.bear&&a.bodyPct>=0.25);}
+function aSafeBull(){const a=analyze();return !!(a&&a.bull&&a.bodyPct>=0.25);}
+function hardLossTriggerPrice(limit){
+ if(!hasValidPaperPosition())return paperPos?.entry||0;
+ const p=paperPos,entry=Number(p.entry),qty=Math.max(0,Number(p.qty));
+ if(!qty)return entry;
+ const dir=p.side==='BUY'?1:-1;
+ let lo=dir===1?entry*0.90:entry, hi=dir===1?entry:entry*1.10;
+ // Find a price whose simulated net PnL is approximately -limit, including fee/slippage.
+ for(let i=0;i<45;i++){const mid=(lo+hi)/2, pnl=currentPaperPnl(mid);if(dir===1){if(pnl<-limit)lo=mid;else hi=mid}else{if(pnl<-limit)hi=mid;else lo=mid}}
+ return dir===1?hi:lo;
+}
+function updatePosition(price){
+ if(!hasValidPaperPosition())return;
+ const p=paperPos;
+ price=Number(price);
+ if(!Number.isFinite(price)||price<=0)return;
+ // Single source of truth: net PNL always includes round-trip fee and slippage.
+ const pnlIDR=currentPaperPnl(price);
+ const previousPeak=Math.max(0,Number(p.peakPnl)||0);
+ if(pnlIDR>previousPeak){p.peakPnl=pnlIDR;p.lastPeakUpdateAt=Date.now();persist();}
+ const netTarget=paperNetTargetIDR(p);
+ if(Number(p.peakPnl||0)>=netTarget){
+   if(!p.autoTrailActive){p.autoTrailActive=true;p.autoTrailPeak=Number(p.peakPnl);p.trail=true;p.be=true;p.sl=Number(p.entry);p.tp=0;persist();log(`PROFIT GUARD ON · ${p.symbol} · net target ${fmtIDR(netTarget)} tercapai · giveback ${PAPER_TRAIL_GIVEBACK_PCT}%`)}
+   const oldTrailPeak=Math.max(0,Number(p.autoTrailPeak)||0);
+   p.autoTrailPeak=Math.max(oldTrailPeak,Number(pnlIDR)||0,Number(p.peakPnl)||0);
+   if(p.autoTrailPeak>oldTrailPeak)persist();
+   const floor=p.autoTrailPeak*(1-PAPER_TRAIL_GIVEBACK_PCT/100);
+   // Only trigger after activation and only when the live net PNL has fallen 20% from peak.
+   if(p.autoTrailPeak>=netTarget && pnlIDR>0 && pnlIDR<=floor){
+     log(`PROFIT GIVEBACK EXIT · ${p.symbol} · peak ${fmtIDR(p.autoTrailPeak)} → net ${fmtIDR(pnlIDR)} · floor ${fmtIDR(floor)} · giveback ${PAPER_TRAIL_GIVEBACK_PCT}%`);
+     closePaper(price,null,'PROFIT GIVEBACK 20%');return;
+   }
+ }
+ const maxLoss=paperMaxRiskIDR(p);
+ if(pnlIDR<=-maxLoss){log(`PAPER MAX RISK EXIT · ${p.symbol} · net PNL ${fmtIDR(pnlIDR)} · limit ${fmtIDR(-maxLoss)}`);closePaper(price,null,'PAPER MAX RISK');return}
+ renderPosition(pnlIDR);updatePaperAccount(pnlIDR);renderTradeVisuals();
+ const hitSL=p.side==='BUY'?price<=p.sl:price>=p.sl;
+ const hitTP=!p.autoTrailActive&&Number(p.tp)>0&&(p.side==='BUY'?price>=p.tp:price<=p.tp);
+ if(hitSL||hitTP)closePaper(price,null,hitSL?'SL/BE':'TP');
+}
+function closePaper(price=(Number.isFinite(Number(livePrice))&&Number(livePrice)>0&&Date.now()-Number(lastWsTickerAt||0)<12000?Number(livePrice):(analyze()?.c.close||paperPos?.entry)),pnlOverride=null,reason='MANUAL'){if(!hasValidPaperPosition())return;let p=paperPos; if(reason==='MANUAL'&&!(Number.isFinite(Number(livePrice))&&Number(livePrice)>0&&Date.now()-Number(lastWsTickerAt||0)<12000))log('CATATAN EXIT: ticker live tidak segar; harga penutupan memakai close candle terakhir.');price=Number(price);if(!Number.isFinite(price)||price<=0)price=Number(livePrice||analyze()?.c?.close||p.entry);const calculatedPnl=currentPaperPnl(price);let pnl=calculatedPnl; if(pnlOverride!==null&&pnlOverride!==undefined&&Math.abs(Number(pnlOverride)-calculatedPnl)>Math.max(1,Math.abs(calculatedPnl)*0.02))log(`PNL RECONCILE · caller ${fmtIDR(Number(pnlOverride))} vs net ${fmtIDR(calculatedPnl)}; memakai net PNL hasil hitung ulang`);dailyPnl+=pnl;paperPnl+=pnl;tradeHistory.push({time:Date.now(),symbol:p.symbol,side:p.side,entry:Number(p.entry),exit:Number(price),qty:Number(p.qty),margin:Number(p.margin||0),leverage:Number(p.leverage||0),pnl,result:pnl>0?'WIN':pnl<0?'LOSS':'BREAKEVEN',reason});if(tradeHistory.length>500)tradeHistory=tradeHistory.slice(-500);$('#paperPnl').textContent=fmtIDR(paperPnl);$('#dailyLossOut').textContent=fmtIDR(dailyPnl);if(pnl<0){lossStreak++;tradeStats.losses++;pairLossStreak[p.symbol]=getPairLossStreak(p.symbol)+1;blockPairAfterLoss(p.symbol);rotateAwaySymbol=p.symbol;rotateAwayUntil=Date.now()+PAIR_LOSS_COOLDOWN_MS}else{lossStreak=0;if(pnl>0)tradeStats.wins++;pairLossStreak[p.symbol]=0;delete pairCooldownUntil[p.symbol];}$('#lossStreak').textContent=lossStreak;updatePairLossUI(p.symbol);const pairLosses=getPairLossStreak(p.symbol);log(`PAPER EXIT ${p.symbol} · ${p.side} · EXIT ${fmtTradeP(price)} · ${fmtIDR(pnl)} · ${reason}`);if(pnl<0){log(`LOSS 1X → ${p.symbol} langsung di-COLDOWN 30 menit. Tutup posisi dan cari pair lain sekarang.`);} tradeMarkers.push({symbol:p.symbol,time:Math.floor(Number(analyze()?.c?.time||Date.now()/1000)),position:p.side==='BUY'?'aboveBar':'belowBar',color:pnl>=0?'#19d59a':'#ff5c72',shape:'circle',text:`EXIT ${fmtTradeP(price)}`}); if(tradeMarkers.length>50)tradeMarkers=tradeMarkers.slice(-50); paperPos=null; clearPositionVisuals(); renderTradeVisuals(); persist(); renderPosition(); updatePaperAccount(0); let a=analyze(); syncPaperStateUI(a); if(pnl<0&&mode==='paper'&&!killed){setTimeout(()=>{if(!hasValidPaperPosition())scan().catch(()=>{});},60)}}
+async function submitOrder(side, options={}){
+  const automatic=!!options.automatic;
+  if(killed){alert('ENTRY LOCK aktif. Matikan ENTRY LOCK untuk mengizinkan manual entry.');return}
+  side=String(side).toUpperCase();
+  if(!['BUY','SELL'].includes(side)){alert('Side tidak valid.');return}
+  if(mode==='paper'){
+    const tfLabel=(TF_LABEL&&TF_LABEL[normalizeTf(chartInterval)])||normalizeTf(chartInterval).toUpperCase();
+    const currentAnalysis=analyze();
+    const badgeText=String($('#finalSignalBadge')?.textContent||'').toUpperCase();
+    const expectedSignal=side==='BUY'?'BUY':'SELL';
+    const automaticCandidate=options.automatic?options.earlyCandidate:null;
+    const entryTfCandles=Array.isArray(entryCandles)&&entryCandles.length>=36?entryCandles:candles;
+    const candidate=entryTfCandles.length>=36?scoreEarlyPair(entryTfCandles):null;
+    if(!currentAnalysis||currentAnalysis.regime==='EXTREME VOLATILITY'){alert(`ENTRY DITAHAN · ${tfLabel}\nData analisis belum siap atau volatilitas ekstrem. Tunggu kondisi lebih stabil.`);log(`ENTRY BLOCKED · ${side} · analysis/risk filter · ${tfLabel}`);return}
+    // Final Signal is the authoritative entry decision. Do not hard-block a valid
+    // displayed BUY/SELL because a second candidate scorer disagrees on a candle edge.
+    if(!automaticCandidate&&!badgeText.startsWith(expectedSignal)){alert(`ENTRY DITAHAN · ${tfLabel}\nFinal Signal saat ini: ${badgeText||'WAIT'}. Tombol ${side} tidak akan melewati sinyal WAIT atau sinyal berlawanan.`);log(`ENTRY BLOCKED · ${side} · Final Signal ${badgeText||'WAIT'} · ${tfLabel}`);return}
+    if(automaticCandidate&&(!automaticCandidate.eligible||automaticCandidate.bias!==(side==='BUY'?'LONG':'SHORT')||!automaticCandidate.fresh||automaticCandidate.extension>=0.85)){log(`AUTO ENTRY DITAHAN · live early candidate tidak valid · ${tfLabel}`);return}
+    const entryCandidate=automaticCandidate||candidate;
+    const candidateMismatch=!entryCandidate?.eligible||entryCandidate.bias!==(side==='BUY'?'LONG':'SHORT');
+    if(candidateMismatch){const why=entryCandidate?.reason||'skor kandidat belum tersedia';if(automatic){log(`AUTO ENTRY DITAHAN · ${side} · kandidat belum lolos: ${why} · ${tfLabel}`);return;}if(!confirm(`PERINGATAN SETUP · ${tfLabel}\nFinal Signal menunjukkan ${side}, tetapi pemeriksa kandidat terpisah belum mengonfirmasi (${why}).\nLanjutkan PAPER secara manual?`)){log(`ENTRY CANCELLED · ${side} · candidate mismatch · ${tfLabel}`);return;}log(`ENTRY OVERRIDE CONFIRMED · ${side} · Final Signal selaras; candidate mismatch: ${why} · ${tfLabel}`)}
+    const dataLabel=String($('#wickDataStatus')?.textContent||'');
+    if(!(dataLabel.startsWith('LIVE'))){alert(`ENTRY DITAHAN · ${tfLabel}\nData market belum terkonfirmasi LIVE (${dataLabel||'status tidak diketahui'}). Tunggu ticker dan candle segar.`);log(`ENTRY BLOCKED · ${side} · market data not LIVE · ${tfLabel}`);return}
+    const setupTf=Array.isArray(entryCandles)&&entryCandles.length>=36?scoreEarlyPair(entryCandles):null;
+    const closedTf=Array.isArray(entryCandles)&&entryCandles.length>=36?entryCandles.slice(0,-1):[];
+    const oscTf=closedTf.length>=35?bbOscillatorReaction(closedTf):{ready:false,direction:'NEUTRAL',score:0};
+    const sideBias=side==='BUY'?'LONG':'SHORT';
+    const conflicts=[];
+    if(setupTf?.eligible&&setupTf.bias!==sideBias)conflicts.push(`setup ${tfLabel} ${setupTf.bias} (${setupTf.score}/100)`);
+    if(oscTf.ready&&oscTf.direction!=='NEUTRAL'&&oscTf.direction!==sideBias&&Math.abs(Number(oscTf.delta)||0)>=2)conflicts.push(`BB/oscillator ${oscTf.direction} (${oscTf.score}/100)`);
+    if(conflicts.length){if(automatic){log(`AUTO ENTRY DITAHAN · konflik indikator ${tfLabel}: ${conflicts.join(' dan ')}`);return;}if(!confirm(`PERINGATAN KONFLUENSI ${tfLabel}\nAnda memilih ${sideBias}, tetapi ${conflicts.join(' dan ')}.\nEntry manual tetap bisa dilakukan, namun risikonya lebih tinggi. Lanjutkan di PAPER?`))return;}
+    const opened=openPaper(side,entryCandidate?.analysis||setupTf?.analysis||null);if(opened&&automatic)log(`AUTO PAPER ENTRY · ${side} ${symbol} · ${tfLabel} · SL/TP terpasang`);return
+  }
+  if(mode!=='demo'&&mode!=='testnet'&&mode!=='live'){alert('Mode trading tidak valid.');return}
+  if(mode==='demo'&&hasValidDemoPosition()){alert('Sudah ada posisi aktif. Tutup dulu sebelum entry baru.');return}
+  if(mode==='testnet'||mode==='live'){
+    try{const ad=await (await fetch('/api/account',{cache:'no-store'})).json();const active=(ad.positions||[]).find(x=>x.symbol===symbol&&Number(x.size)>0);if(active){alert('Sudah ada posisi aktif pada '+symbol+'. Tutup dulu sebelum entry baru.');return}}
+    catch(e){log('Account check gagal: '+e.message)}
+  }
+  let a=analyze();
+  if(!a||!a.c){alert('Market data belum siap. Tunggu chart realtime.');return}
+  let sp=Number($('#slPct').value)/100,rr=Number($('#rr').value),p=a.c.close,sl=side==='BUY'?p*(1-sp):p*(1+sp),tp=side==='BUY'?p*(1+sp*rr):p*(1-sp*rr),q=Number($('#qty').value);
+  if(!Number.isFinite(q)||q<=0){alert('Quantity harus lebih dari 0.');return}if(!confirm(`${mode.toUpperCase()} ${side} ${symbol}\nEntry ~ ${fmtP(p)}\nSL ${fmtP(sl)}\nTP ${fmtP(tp)}\nKirim order?`))return;try{let endpoint=mode==='testnet'?'/api/bracket-order':'/api/bracket-order';let r=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol,side,quantity:q,stopPrice:sl,takeProfitPrice:tp})});let d=await r.json();if(!r.ok)throw Error(d.error||'Order gagal');log(`${mode.toUpperCase()} ${side} ${symbol} entry ${d.entry?.orderId||'ok'} + bracket SL/TP`);await account()}catch(e){log('ORDER ERROR: '+e.message);alert(e.message)}}
+async function closePosition(){if(mode==='paper'){closePaper();return}let d=await (await fetch('/api/account',{cache:'no-store'})).json();let p=(d.positions||[]).find(x=>x.symbol===symbol&&Number(x.size)>0);if(!p){alert('Tidak ada posisi Bybit untuk pair ini.');return}if(!confirm('Tutup posisi '+symbol+' sekarang?'))return;let side=String(p.side).toLowerCase()==='buy'?'SELL':'BUY';try{let r=await fetch('/api/close',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol,side,quantity:Math.abs(Number(p.size))})});let x=await r.json();if(!r.ok)throw Error(x.error||'Close gagal');log(`MANUAL ${mode.toUpperCase()} position close sent`);await account();if(mode==='demo')await fetchDemoHistory()}catch(e){alert(e.message)}}
+async function account(){if(mode==='paper'){updatePaperAccount(hasValidPaperPosition()?currentPaperPnl(livePrice||analyze()?.c?.close||paperPos?.entry):0);renderPerformance(hasValidPaperPosition()?currentPaperPnl(livePrice||analyze()?.c?.close||paperPos?.entry):0);return}try{let d=await(await fetch('/api/account',{cache:'no-store'})).json();if(!d.connected){$('#acctStatus').textContent='NOT CONFIGURED';$('#liveWarning').textContent='API Bybit belum terhubung.';return}demoPositions=Array.isArray(d.positions)?d.positions:[];accountEquity=+d.account.walletBalance*IDR;const available=+d.account.availableBalance*IDR;const unrealRaw=Number(d.account.unrealizedProfit??d.account.totalPerpUPL);const positionsUpl=(demoPositions||[]).reduce((sum,x)=>sum+Number(x.unrealisedPnl??x.unrealizedPnl??0),0);const unreal=((Number.isFinite(unrealRaw)&&(unrealRaw!==0||positionsUpl===0))?unrealRaw:positionsUpl)*IDR;$('#acctStatus').textContent=mode==='demo'?'BYBIT DEMO CONNECTED':'CONNECTED';$('#balance').textContent=fmtIDR(accountEquity);$('#available').textContent=fmtIDR(available);$('#unrealized').textContent=fmtIDR(unreal);const p=currentDemoPosition();if(mode==='demo'){if(p){const side=demoPositionSide(p);$('#position').innerHTML=`<div class="grid3"><div class="metric"><span class="muted">Side</span><b class="${side==='BUY'?'up':'down'}">${side} ${p.symbol}</b></div><div class="metric"><span class="muted">Entry</span><b>${fmtTradeP(Number(p.avgPrice))}</b></div><div class="metric"><span class="muted">Qty</span><b>${demoPositionQty(p).toFixed(6)}</b></div></div><div class="grid3" style="margin-top:7px"><div class="metric"><span class="muted">Leverage</span><b>${p.leverage||'-'}x</b></div><div class="metric"><span class="muted">PnL</span><b class="${demoPnlForPosition(p)>=0?'up':'down'}">${fmtIDR(demoPnlForPosition(p))}</b></div><div class="metric"><span class="muted">SL / TP</span><b>${p.stopLoss?fmtTradeP(p.stopLoss):'—'} / ${p.takeProfit?fmtTradeP(p.takeProfit):'—'}</b></div></div>`;chart&&chart.setPosition({symbol:p.symbol,side,entry:Number(p.avgPrice),qty:demoPositionQty(p),sl:Number(p.stopLoss||0),tp:Number(p.takeProfit||0)});}else{$('#position').innerHTML='<div class="muted">BYBIT DEMO · Tidak ada posisi.</div>';chart&&chart.setPosition(null)}renderDemoPerformance();}else{renderPosition(unreal)} }catch(e){log('Account error: '+e.message);$('#acctStatus').textContent='SYNC ERROR'}}
+function setMode(){mode=$('#orderMode').value;if(mode!=='paper'&&autoTradeMode==='auto'){autoTradeMode='manual';log('AUTO TRADE dimatikan otomatis karena mode bukan PAPER.');}$('#mode').textContent=mode==='demo'?'BYBIT DEMO · 15M':mode.toUpperCase()+' · 15M';$('#liveWarning').className=mode==='live'?'dangerbox':mode==='demo'?'warning':mode==='testnet'?'warning':'goodbox';$('#liveWarning').textContent=mode==='live'?'LIVE AKTIF hanya jika server ALLOW_LIVE_TRADING=true.':mode==='demo'?'BYBIT DEMO: saldo, posisi, order, PnL & history dibaca dari akun Demo. Trading MANUAL ONLY. Scanner boleh mengganti pair, tetapi tidak pernah membuka/menutup order otomatis.':'PAPER: tidak ada order sungguhan.';account();if(mode==='demo')fetchDemoHistory()}
+function isPairBlocked(sym){return Number(pairCooldownUntil[sym]||0)>Date.now() || (sym===rotateAwaySymbol && Date.now()<rotateAwayUntil);}
+async function manualNextPair(){
+ if(hasValidPaperPosition() || (mode!=='paper' && demoPositions.some(x=>Number(x.size)>0))){alert('Tutup posisi aktif terlebih dahulu sebelum ganti pair manual.');return}
+ const current=symbol; rotateAwaySymbol=current; rotateAwayUntil=Date.now()+15*60*1000; lastSwitchAt=Date.now();
+ const items=$$('#symbols .sym').map(el=>({el,sym:el.dataset.s||el.querySelector('b')?.textContent?.trim()||''})).filter(x=>x.sym&&x.sym!==current&&!isPairBlocked(x.sym));
+ let target=items[0]?.sym;
+ if(!target){await scan();const fresh=$$('#symbols .sym').map(el=>el.dataset.symbol||'').filter(x=>x&&x!==current&&!isPairBlocked(x));target=fresh[0]}
+ if(!target){alert('Belum ada pair lain yang tersedia.');return}
+ log(`MANUAL PAIR SWITCH · ${current} → ${target}`);await switchSymbol(target);
+}
+function runBacktest(){let n=Math.min(Number($('#btLimit').value),candles.length-25),risk=Number($('#btRisk').value),rr=Number($('#btRR').value),start=candles.length-n,equity=0,peak=0,maxDD=0,wins=0,losses=0,net=0,worst=0,streak=0,best=-Infinity;for(let i=start+20;i<candles.length-1;i++){let sub=candles.slice(0,i+1),old=candles; candles=sub;let a=analyze();candles=old;if(!a)continue;let signal=$('#btStrategy').value==='reversal'?(a.wick===1?'LONG':a.wick===-1?'SHORT':null):a.bias==='LONG'?'LONG':a.bias==='SHORT'?'SHORT':null;if(!signal||!a.allowed)continue;let entry=candles[i].close,slPct=Number($('#slPct').value)/100,sl=signal==='LONG'?entry*(1-slPct):entry*(1+slPct),tp=signal==='LONG'?entry*(1+slPct*rr):entry*(1-slPct*rr),out=null;for(let j=i+1;j<candles.length;j++){let c=candles[j];if(signal==='LONG'){if(c.low<=sl){out=-1;break}if(c.high>=tp){out=rr;break}}else{if(c.high>=sl){out=-1;break}if(c.low<=tp){out=rr;break}}}if(out===null)continue;net+=out;equity+=out*risk;best=Math.max(best,out);if(out>0){wins++;streak=0}else{losses++;streak++;worst=Math.max(worst,streak)}peak=Math.max(peak,equity);maxDD=Math.max(maxDD,peak-equity)}let trades=wins+losses,pf=losses?wins*rr/losses:Infinity;$('#btTrades').textContent=trades;$('#btWin').textContent=trades?(wins/trades*100).toFixed(1)+'%':'—';$('#btPF').textContent=Number.isFinite(pf)?pf.toFixed(2):'∞';$('#btDD').textContent=maxDD.toFixed(2)+'%';$('#btNet').textContent=net.toFixed(2)+'R';$('#btStreak').textContent=worst;$('#btBest').textContent=best===-Infinity?'—':best.toFixed(2)+'R';$('#btSummary').textContent=trades?`Hasil simulasi 15M: ${trades} trade, ${wins} win, ${losses} loss. Consecutive loss terburuk ${worst}. Gunakan hasil ini untuk mengukur robustness, bukan jaminan hasil masa depan.`:'Tidak ada setup valid pada periode tersebut.';log('Backtest selesai: '+trades+' trades')}
+$$('[data-tool]').forEach(b=>b.onclick=()=>{$$('[data-tool]').forEach(x=>x.classList.remove('active'));b.classList.add('active');tool=b.dataset.tool});$('#srBtn').onclick=()=>{srActive=!srActive;$('#srBtn').classList.toggle('active',srActive);if(srActive)drawSR();else{drawings.forEach(x=>x.remove?.());drawings=[]}};$('#clearDraw').onclick=()=>{drawings.forEach(x=>x.remove?.());drawings=[]};$('#buyBtn').onclick=()=>submitOrder('BUY');$('#sellBtn').onclick=()=>submitOrder('SELL');$('#tradeModeToggle')?.addEventListener('click',()=>{if(autoTradeMode==='manual'){if(mode!=='paper'){alert('Auto Trade saat ini hanya diaktifkan untuk PAPER agar tidak mengirim order sungguhan. Pilih mode PAPER terlebih dahulu.');return;}if(killed){alert('ENTRY LOCK aktif. Matikan ENTRY LOCK terlebih dahulu.');return;}if(!confirm('Aktifkan AUTO TRADE PAPER? Sistem akan membuka posisi simulasi otomatis saat Final Signal, data LIVE, timeframe aktif, dan risk guard memenuhi syarat. Tidak ada order exchange yang dikirim.'))return;autoTradeMode='auto';autoEntryLastKey='';log('AUTO TRADE PAPER ON · auto-entry only in PAPER; SL/TP guards active');}else{autoTradeMode='manual';log('AUTO TRADE OFF · kembali ke manual');}runAutoPaperTrade();});$('#closeBtn').onclick=closePosition;$('#beBtn').onclick=()=>{if(paperPos){paperPos.sl=paperPos.entry*(paperPos.side==='BUY'?1.0002:.9998);paperPos.be=true;renderPosition();log('Manual SL Plus / BE')}};$('#partialBtn').onclick=()=>{if(paperPos&&!paperPos.partial){paperPos.qty*=.5;paperPos.partial=true;log('Partial TP: 50% size dikunci')}};$('#trailBtn').onclick=()=>{if(paperPos){paperPos.trail=!paperPos.trail;log('Trailing '+(paperPos.trail?'ON':'OFF'))}};$('#orderMode').onchange=setMode;['margin','lev','risk','slPct','rr','maxFloatLoss'].forEach(id=>{const el=$('#'+id);if(el){el.addEventListener('input',()=>{renderPaperOrderPreview();persist();});el.addEventListener('change',()=>{renderPaperOrderPreview();persist();});}});$('#accountBtn').onclick=account;$('#refreshScan').onclick=scan;$('#autoToggle').onclick=()=>{auto=!auto;$('#autoToggle').textContent=auto?'PAIR SCAN ONLY':'PAIR SCAN OFF';$('#autoToggle').classList.toggle('active',auto);log('PAIR SCANNER '+(auto?'ON':'OFF')+' · trading tetap MANUAL')};$('#autoTfToggle')?.addEventListener('click',()=>{autoTimeframe=!autoTimeframe;$('#autoTfToggle').textContent=autoTimeframe?'AUTO TF: ON':'AUTO TF: OFF';$('#autoTfToggle').classList.toggle('active',autoTimeframe);log('AUTO TIMEFRAME '+(autoTimeframe?'ON · sistem boleh pindah chart ke timeframe momentum terkuat':'OFF · timeframe chart dikendalikan manual'));if(autoTimeframe)lastMultiTfScanAt=0;});$('#killBtn').onclick=()=>{killed=!killed;$('#killBtn').textContent='ENTRY LOCK: '+(killed?'ON':'OFF');$('#killBtn').classList.toggle('active',killed);log(killed?'ENTRY LOCK ON — manual entry diblokir':'ENTRY LOCK OFF — manual entry diizinkan');if(!killed&&mode==='demo')account();};$('#runBacktest').onclick=runBacktest;$('#downloadHistory').onclick=downloadTradeHistory;$('#downloadJpg').onclick=downloadTradeJpg;$('#nextPairBtn')?.addEventListener('click',manualNextPair);
+
+// V25 BYBIT-STYLE UI: orderbook, leverage, quantity controls, TP/SL, position/order tabs.
+let btOrderBookTimer=null, btOrderBookBusy=false;
+async function loadBtOrderBook(){
+ if(btOrderBookBusy)return; btOrderBookBusy=true;
+ try{
+  const d=await bybitPublic('/v5/market/orderbook',{category:'linear',symbol:symbol,limit:'10'});
+  const asks=(d?.result?.a||[]).slice(0,5).map(x=>({p:Number(x[0]),q:Number(x[1])}));
+  const bids=(d?.result?.b||[]).slice(0,5).map(x=>({p:Number(x[0]),q:Number(x[1])}));
+  const fmt=x=>Number(x).toLocaleString('en-US',{maximumFractionDigits:priceDecimals(x)});
+  const rows=(arr,cls)=>arr.map(x=>`<div class="bt-row ${cls}"><span>${fmt(x.p)}</span><span>${x.q.toFixed(6)}</span><span>${(x.p*x.q).toFixed(3)}</span></div>`).join('');
+  $('#btAsks').innerHTML=rows(asks,'bt-ask')||'<div class="bt-note">—</div>';
+  $('#btBids').innerHTML=rows(bids,'bt-bid')||'<div class="bt-note">—</div>';
+  const mid=asks[0]&&bids[0]?(asks[0].p+bids[0].p)/2:(candles.at(-1)?.close||0);$('#btMid').textContent=mid?fmt(mid):'—';
+  $('#btMarketStatus').textContent='ORDER BOOK · '+new Date().toLocaleTimeString('id-ID',{hour12:false});
+ }catch(e){$('#btMarketStatus').textContent='ORDER BOOK ERROR'} finally{btOrderBookBusy=false}
+}
+function updateBtHeader(){
+ const a=analyze(), p=a?.c?.close||candles.at(-1)?.close||0;
+ $('#btSymbol').textContent=symbol; $('#btPrice').textContent=p?fmtTradeP(p):'—';
+ const pc=Number(candles.at(-1)?.close||0),po=Number(candles.at(-1)?.open||0),chg=po?((pc-po)/po*100):0;
+ $('#btChange').textContent=(chg>=0?'+':'')+chg.toFixed(2)+'%';$('#btChange').className='bt-sub '+(chg>=0?'up':'down');const last24=candles.slice(-96);if(last24.length){$('#btLastPrice').textContent=fmtTradeP(p);$('#btHigh24').textContent=fmtTradeP(Math.max(...last24.map(x=>+x.high)));$('#btLow24').textContent=fmtTradeP(Math.min(...last24.map(x=>+x.low)));}
+ $('#btAvailable').textContent=$('#available')?.textContent||'—';
+ if(a&&p){const slPct=Number($('#btSLPct').value||0.8)/100,rr=Number($('#btRR').value||2),sl=a.bias==='SHORT'?p*(1+slPct):p*(1-slPct),tp=a.bias==='SHORT'?p*(1-slPct*rr):p*(1+slPct*rr);$('#btLimitPrice').value=Number(p.toFixed(priceDecimals(p)));$('#btLimitPrice').dataset.sl=sl;$('#btLimitPrice').dataset.tp=tp;}
+ renderBtPosition();renderBtOrderPreview();
+}
+function renderBtOrderPreview(){const p=Number($('#btPrice').textContent.replace(/,/g,''))||Number(candles.at(-1)?.close||0),q=Math.max(0,Number($('#btQty').value)||0),lev=Math.max(1,Number($('#btLevSelect').value)||10),value=p*q*IDR,fee=value*(Number($('#fee')?.value||0.04)/100);$('#btValue').textContent=fmtIDR(value);$('#btFee').textContent=fmtIDR(fee);$('#btQtySlider').value=Math.min(100,Math.max(0,Number($('#btQtySlider').value)||0));}
+function renderBtPosition(){if(!$('#btPosCount'))return;const p=paperPos;if(p&&hasValidPaperPosition()){const pnl=currentPaperPnl(candles.at(-1)?.close||p.entry);$('#btPosCount').textContent='1';$('#btPosSide').textContent=p.side+' '+p.symbol;$('#btPosSide').className=p.side==='BUY'?'up':'down';$('#btPosEntry').textContent=fmtTradeP(p.entry);$('#btPosPnl').textContent=fmtIDR(pnl);$('#btPosPnl').className=pnl>=0?'up':'down';}else{$('#btPosCount').textContent='0';$('#btPosSide').textContent='—';$('#btPosEntry').textContent='—';$('#btPosPnl').textContent='Rp 0';}}
+async function btSubmit(side){
+ const type=$('#btOrderType').value, reduce=$('#btReduceOnly').checked;
+ if(reduce&&!hasValidPaperPosition()){alert('Hanya Kurangi: belum ada posisi aktif.');return;}
+ if(type==='limit'&&mode==='paper'){alert('Limit order Paper akan menjadi pending-order engine pada revisi berikutnya. Gunakan Market untuk entry Paper saat ini.');return;}
+ if(reduce&&mode==='paper'){closePaper();return;}
+ if($('#btTPSL').checked){$('#slPct').value=$('#btSLPct').value;$('#rr').value=$('#btRR').value;}
+ $('#lev').value=String(Number($('#btLevSelect').value)||10);$('#qty').value=$('#btQty').value;
+ renderPaperOrderPreview();submitOrder(side);
+}
+let activeSubIndicator='mavol', btGridOn=true;
+function smaArr(vals,n){const out=[];let sum=0;for(let i=0;i<vals.length;i++){sum+=Number(vals[i]||0);if(i>=n)sum-=Number(vals[i-n]||0);out.push(i+1>=n?sum/n:null)}return out}
+function emaArr(vals,n){const out=[];const k=2/(n+1);let prev=null;for(let i=0;i<vals.length;i++){const v=Number(vals[i]||0);prev=prev==null?v:v*k+prev*(1-k);out.push(prev)}return out}
+function rsiArr(vals,n=14){const out=Array(vals.length).fill(null);let g=0,l=0;for(let i=1;i<vals.length;i++){const d=vals[i]-vals[i-1],up=Math.max(0,d),dn=Math.max(0,-d);if(i<=n){g+=up;l+=dn;if(i===n){const rs=l?g/l:99;out[i]=100-100/(1+rs)}}else{g=(g*(n-1)+up)/n;l=(l*(n-1)+dn)/n;const rs=l?g/l:99;out[i]=100-100/(1+rs)}}return out}
+function renderIndicatorPanel(){const cv=$('#indicatorCanvas');if(!cv||!candles.length)return;const rect=cv.getBoundingClientRect(),d=devicePixelRatio||1,W=Math.max(1,rect.width),H=Math.max(120,rect.height);cv.width=Math.floor(W*d);cv.height=Math.floor(H*d);const c=cv.getContext('2d');c.setTransform(d,0,0,d,0,0);c.clearRect(0,0,W,H);c.fillStyle='#070d14';c.fillRect(0,0,W,H);const data=candles.slice(-90),cl=data.map(x=>+x.close),vol=data.map(x=>+x.volume||0);const x=i=>10+i*Math.max(1,(W-20)/Math.max(1,data.length-1));let vals=[];let label='';if(activeSubIndicator==='mavol'){vals=smaArr(vol,5);label='VOLUME · MA5';}else if(activeSubIndicator==='macd'){const e12=emaArr(cl,12),e26=emaArr(cl,26);const mac=e12.map((v,i)=>v-(e26[i]||v)),sig=emaArr(mac,9);vals=mac;label='MACD 12/26 · SIGNAL 9';drawLine(sig,'#4de1ff');}else if(activeSubIndicator==='kdj'){vals=cl.map((v,i)=>{const a=data.slice(Math.max(0,i-8),i+1),lo=Math.min(...a.map(z=>+z.low)),hi=Math.max(...a.map(z=>+z.high));return hi===lo?50:(v-lo)/(hi-lo)*100});label='KDJ · 9';}else if(activeSubIndicator==='rsi'){vals=rsiArr(cl,14);label='RSI 14';drawRef(70);drawRef(30);}else if(activeSubIndicator==='wr'){vals=cl.map((v,i)=>{const a=data.slice(Math.max(0,i-13),i+1),lo=Math.min(...a.map(z=>+z.low)),hi=Math.max(...a.map(z=>+z.high));return hi===lo?-50:(hi-v)/(hi-lo)*-100});label='WILLIAMS %R';}else{const r=rsiArr(cl,14);vals=r.map((v,i)=>v==null?null:100*(v-Math.min(...r.slice(Math.max(0,i-13),i+1).filter(Number.isFinite)))/(Math.max(...r.slice(Math.max(0,i-13),i+1).filter(Number.isFinite))-Math.min(...r.slice(Math.max(0,i-13),i+1).filter(Number.isFinite))||1));label='STOCH RSI';drawRef(80);drawRef(20);}const finite=vals.filter(Number.isFinite),lo=Math.min(...finite,0),hi=Math.max(...finite,1);const y=v=>H-18-(v-lo)/(hi-lo||1)*(H-38);c.strokeStyle='#17283a';c.lineWidth=1;for(let i=0;i<4;i++){const yy=10+i*(H-28)/3;c.beginPath();c.moveTo(0,yy);c.lineTo(W,yy);c.stroke()}c.strokeStyle='#19d59a';c.lineWidth=1.5;c.beginPath();let started=false;vals.forEach((v,i)=>{if(!Number.isFinite(v))return;const xx=x(i),yy=y(v);if(!started){c.moveTo(xx,yy);started=true}else c.lineTo(xx,yy)});c.stroke();c.fillStyle='#7f90a6';c.font='10px system-ui';c.fillText(label,10,14);const last=vals.at(-1);if(Number.isFinite(last)){c.fillStyle='#e9f0f8';c.fillText(String(last.toFixed(2)),W-10,14);}
+function drawRef(v){if(!Number.isFinite(v))return;const yy=y(v);c.strokeStyle='#4d6075';c.setLineDash([4,4]);c.beginPath();c.moveTo(0,yy);c.lineTo(W,yy);c.stroke();c.setLineDash([])}
+function drawLine(arr,col){const f=arr.map(Number).filter(Number.isFinite);if(!f.length)return;const mn=Math.min(lo,...f),mx=Math.max(hi,...f);const yy=v=>H-18-(v-mn)/(mx-mn||1)*(H-38);c.strokeStyle=col;c.lineWidth=1;c.beginPath();let st=false;arr.forEach((v,i)=>{if(!Number.isFinite(v))return;const xx=x(i),y2=yy(v);if(!st){c.moveTo(xx,y2);st=true}else c.lineTo(xx,y2)});c.stroke()}}
+async function setVisualTf(v){const raw=String(v||'15m').trim();let tf=normalizeTf(raw);if(!TF_API[tf]&&/^(1|3|5|15|30|60|120|240|360|720|D|W|M)$/.test(raw))tf=normalizeTf(raw);if(tf===normalizeTf(chartInterval)){updateTfUI(tf);return;}chartInterval=tfApi(tf);const label=TF_LABEL[tf]||tf;updateTfUI(tf);const gen=++symbolGeneration;marketSeq++;try{ws?.close()}catch{}clearTimeout(wsReconnectTimer);clearInterval(wsWatchdogTimer);restBusy=false;$('#conn').textContent='LOADING '+label+' · '+symbol;log('Mengganti timeframe chart → '+label);const ok=await loadCandles(symbol,gen);if(ok)await loadEntryCandles(symbol,gen);if(gen!==symbolGeneration)return;if(ok){chart?.fitContent();renderTradeVisuals();connectWS(symbol,gen);$('#mode').textContent=String(mode||'PAPER').toUpperCase()+' · '+label;log('Timeframe aktif '+label+' · candle REST + WebSocket realtime');}else{$('#conn').textContent='TIMEFRAME DATA ERROR · '+label;log('Gagal memuat candle '+label);}}function updateTfUI(tf){const label=TF_LABEL[tf]||tf.toUpperCase();const scanTf=$('#scanTfLabel');if(scanTf)scanTf.textContent=label.toUpperCase();const tradeHead=document.querySelector('.panel.section .phead');const mi=document.querySelector('.panel.section .phead');if(mi)mi.textContent='MARKET INTELLIGENCE · '+label;const heads=[...document.querySelectorAll('.panel .phead')];const manualHead=heads.find(x=>x.textContent.includes('MANUAL TRADING'));if(manualHead)manualHead.textContent=`MANUAL TRADING · SCANNER → ${label} CLOSED CANDLE + EMA20 + MOMENTUM → MANUAL/AUTO PAPER → RISK → SL/TP → BREAK EVEN`;const method=$('#chartEntryMethod');if(method)method.textContent=`● ${label.toUpperCase()} CLOSE ENTRY · ▲ BUY / ▼ SELL · candle + EMA20 + momentum · garis Entry / SL / TP`;$('#visualTfPill').textContent='VIEW '+label;$('#btSymbol').closest('.bt-symbol')?.querySelector('.bt-sub')?.replaceChildren(document.createTextNode('Bybit Linear · Chart '+label));$$('[data-tf]').forEach(x=>x.classList.toggle('active',normalizeTf(x.dataset.tf)===tf));$$('[data-moretf]').forEach(x=>x.classList.toggle('active',normalizeTf(x.dataset.moretf)===tf));}
+function initV26IndicatorUI(){
+ $$('[data-subind]').forEach(b=>b.onclick=()=>{$$('[data-subind]').forEach(x=>x.classList.remove('active'));b.classList.add('active');activeSubIndicator=b.dataset.subind;renderIndicatorPanel();});
+ $('#entryNoticeClose')?.addEventListener('click',()=>$('#entryNotice')?.classList.remove('show'));$('#exitNoticeClose')?.addEventListener('click',()=>$('#exitNotice')?.classList.remove('show'));
+ $$('[data-tf]').forEach(b=>b.onclick=()=>{setVisualTf(b.dataset.tf).catch(e=>log('Timeframe error: '+e.message));});
+ const moreBtn=$('#moreTfBtn'), moreMenu=$('#moreTfMenu');
+ moreBtn?.addEventListener('click',e=>{e.stopPropagation();moreMenu?.classList.toggle('open');});
+ document.addEventListener('click',e=>{if(moreMenu&&!moreMenu.contains(e.target)&&e.target!==moreBtn)moreMenu.classList.remove('open');});
+ $$('[data-moretf]').forEach(b=>b.onclick=()=>{setVisualTf(b.dataset.moretf).catch(e=>log('Timeframe error: '+e.message));moreMenu?.classList.remove('open');});
+ $('#customTfBtn')?.addEventListener('click',()=>{const v=prompt('Interval: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d, 1w, 1M (atau kode Bybit 1,3,5,15,30,60,120,240,360,720,D,W,M)','15m');if(!v)return;const tf=normalizeTf(v);if(!TF_API[tf]){alert('Interval tidak didukung');return;}setVisualTf(tf).catch(e=>log('Timeframe error: '+e.message));moreMenu?.classList.remove('open');});
+ $('#gridToolBtn')?.addEventListener('click',()=>{btGridOn=!btGridOn;$('#gridToolBtn').classList.toggle('active',btGridOn);log('Chart grid '+(btGridOn?'ON':'OFF'));});
+ $('#settingsToolBtn')?.addEventListener('click',()=>alert('Chart settings: timeframe mengikuti pilihan aktif, Bybit Linear, candle realtime, indikator aktif di panel bawah.'));
+ $('#drawToolBtn')?.addEventListener('click',()=>{$('[data-tool="trend"]')?.click();});
+ $$('[data-mtab]').forEach(b=>b.onclick=()=>{ $$('[data-mtab]').forEach(x=>x.classList.remove('active'));b.classList.add('active');const pane=$('#btMarketPane');if(b.dataset.mtab==='book'){pane.innerHTML='<div class="bt-note">Order book realtime tampil di panel ASK/BID di atas.</div>';}else if(b.dataset.mtab==='trades'){pane.innerHTML='<div id="btTradeFeed" class="bt-tradefeed"><div class="bt-note">Memuat transaksi Bybit…</div></div>';loadBtRecentTrades();}else{pane.innerHTML='<div class="bt-contract-grid"><div class="bt-contract-item"><span>Kontrak</span><b id="ctSymbol">'+symbol+'</b></div><div class="bt-contract-item"><span>Kategori</span><b>Linear USDT</b></div><div class="bt-contract-item"><span>Leverage</span><b id="ctLev">'+($('#lev')?.value||10)+'x</b></div><div class="bt-contract-item"><span>Funding</span><b id="ctFunding">—</b></div><div class="bt-contract-item"><span>Tick Size</span><b id="ctTick">—</b></div><div class="bt-contract-item"><span>Min Qty</span><b id="ctMinQty">—</b></div></div>';loadBtContractInfo();}});
+ renderIndicatorPanel();
+}
+async function loadBtRecentTrades(){try{const d=await bybitPublic('/v5/market/recent-trade',{category:'linear',symbol:symbol,limit:'20'}),rows=d?.result?.list||[];const el=$('#btTradeFeed');if(!el)return;el.innerHTML=rows.slice(0,12).map(x=>{const up=String(x.S||'Buy').toLowerCase()==='buy';return '<div class="bt-trade-row"><span>'+fmtTradeP(Number(x.p))+'</span><span class="'+(up?'up':'down')+'">'+(up?'BUY':'SELL')+'</span><span>'+Number(x.v||0).toFixed(4)+'</span></div>'}).join('')||'<div class="bt-note">Tidak ada transaksi.</div>';}catch(e){const el=$('#btTradeFeed');if(el)el.innerHTML='<div class="bt-note">Feed transaksi tidak tersedia.</div>';}}
+async function loadBtContractInfo(){try{const d=await bybitPublic('/v5/market/instruments-info',{category:'linear',symbol:symbol}),x=d?.result?.list?.[0];if(!x)return;$('#ctTick').textContent=x.priceFilter?.tickSize||'—';$('#ctMinQty').textContent=x.lotSizeFilter?.minOrderQty||'—';}catch{}}
+function initV25BybitUI(){
+ $('#btLong').onclick=()=>btSubmit('BUY');$('#btShort').onclick=()=>btSubmit('SELL');
+ $('#btOrderType').onchange=()=>{$('#btLimitWrap').style.display=$('#btOrderType').value==='limit'?'grid':'none'};
+ $('#btLevSelect').onchange=()=>{$('#lev').value=parseInt($('#btLevSelect').value)||10;renderPaperOrderPreview();persist()};
+ $('#btQty').oninput=()=>{const q=Number($('#btQty').value)||0;$('#qty').value=q;renderBtOrderPreview()};
+ $('#btQtySlider').oninput=()=>{const pct=Number($('#btQtySlider').value)||0;const bal=Math.max(0,Number(accountEquity+paperPnl));const lev=Math.max(1,Number($('#btLevSelect').value)||10);const price=Number(candles.at(-1)?.close||0);const maxQty=price?bal*lev/(price*IDR):0;$('#btQty').value=(maxQty*pct/100).toFixed(6);$('#qty').value=$('#btQty').value;renderBtOrderPreview()};
+ $$('[data-qpct]').forEach(b=>b.onclick=()=>{$('#btQtySlider').value=b.dataset.qpct;$('#btQtySlider').dispatchEvent(new Event('input'))});
+ $$('[data-btab]').forEach(b=>b.onclick=()=>{$$('[data-btab]').forEach(x=>x.classList.remove('active'));b.classList.add('active');if(b.dataset.btab==='pos')$('#btBottom').innerHTML='<div class="bt-posgrid"><div class="metric"><span class="muted">Side</span><b id="btPosSide">—</b></div><div class="metric"><span class="muted">Entry</span><b id="btPosEntry">—</b></div><div class="metric"><span class="muted">PnL</span><b id="btPosPnl">Rp 0</b></div></div>';else if(b.dataset.btab==='ord')$('#btBottom').innerHTML='<div class="bt-note">Order aktif Paper/Bybit akan ditampilkan di sini. Mode PAPER tidak membuat order exchange.</div>';else $('#btBottom').innerHTML='<div class="bt-note">Aset mengikuti Account · IDR / Bybit Demo saat mode Demo aktif.</div>'});
+ $$('[data-ind]').forEach(b=>b.onclick=()=>{b.classList.toggle('active');log('Indikator '+b.dataset.ind.toUpperCase()+' '+(b.classList.contains('active')?'ON':'OFF'));});
+ updateBtHeader();loadBtOrderBook();clearInterval(btOrderBookTimer);btOrderBookTimer=setInterval(()=>{loadBtOrderBook();updateBtHeader()},2000);
+}
+
+(async()=>{killed=false;auto=true;autoTimeframe=true;autoTradeMode='manual';$('#autoTfToggle').textContent='AUTO TF: ON';$('#autoToggle').textContent='PAIR SCAN ONLY';$('#autoToggle').classList.add('active');$('#killBtn').textContent='ENTRY LOCK: OFF';$('#killBtn').classList.remove('active');initChart();restore();updatePairLossUI(symbol);renderPaperOrderPreview();$('#symbolTitle').textContent=symbol;symbolGeneration++;const bootGen=symbolGeneration;try{await diagnoseMarketAccess();await syncMarketClock();setInterval(syncMarketClock,30000);const historyOK=await loadCandles(symbol,bootGen);await loadEntryCandles(symbol,bootGen);if(bootGen===symbolGeneration){connectWS(symbol,bootGen);}renderPosition();initV25BybitUI();initV26IndicatorUI();if(historyOK)await scan();else { $('#scanState').textContent='BYBIT MARKET BLOCKED'; $('#conn').textContent=`MARKET UNAVAILABLE · ${marketDiagnostic.direct} · ${marketDiagnostic.proxy}`; }log('System ready · BYBIT LINEAR · '+(TF_LABEL[normalizeTf(chartInterval)]||chartInterval)+' · WebSocket-first · REST history/reconciliation')}catch(e){log('Init error: '+e.message);try{connectWS(symbol,bootGen)}catch{}}setInterval(updateUI,1000);setInterval(()=>{if(mode==='demo')account().catch(()=>{});},2000);setInterval(()=>{if(mode==='demo')fetchDemoHistory().catch(()=>{});},7000);setInterval(scan,HUNTER.scanMs)})();
+
