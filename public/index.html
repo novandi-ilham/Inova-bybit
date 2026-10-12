@@ -530,7 +530,15 @@ function runAutoPaperTrade(){
  if(btn){btn.textContent=autoTradeMode==='auto'?'AUTO TRADE: ON · PAPER':'AUTO TRADE: OFF · MANUAL';btn.classList.toggle('active',autoTradeMode==='auto');btn.classList.toggle('buy',autoTradeMode==='auto');}
  if(help)help.textContent=autoTradeMode==='auto'?'AUTO PAPER aktif: menilai candle live pada fase awal, membatalkan entry terlambat/berlawanan, hanya satu posisi, dan risk guard aktif.':'Manual entry aktif. Auto entry hanya tersedia pada PAPER; tidak mengirim order sungguhan.';
  if(autoTradeMode!=='auto'||mode!=='paper'||killed||autoEntryBusy||hasValidPaperPosition())return;
- const data=String($('#wickDataStatus')?.textContent||'');if(!data.startsWith('LIVE'))return;
+ const data=String($('#wickDataStatus')?.textContent||'');
+ // Entry needs a fresh websocket kline AND ticker. REST recovery may keep chart
+ // visible, but should not trigger an automatic entry from stale/mixed prices.
+ const wsKlineFresh=!!lastWsKlineAt&&Date.now()-lastWsKlineAt<5000;
+ const wsTickerFresh=!!lastWsTickerAt&&Date.now()-lastWsTickerAt<5000;
+ if(!data.startsWith('LIVE')||!wsKlineFresh||!wsTickerFresh){
+   if(autoTradeMode==='auto') log(`AUTO WAIT · ${symbol} · data belum segar (kline ${wsKlineFresh?'OK':'stale'}, ticker ${wsTickerFresh?'OK':'stale'})`);
+   return;
+ }
  if(!(Number(livePrice)>0&&Date.now()-Number(lastWsTickerAt||0)<8000))return;
  const tf=normalizeTf(chartInterval),src=(Array.isArray(entryCandles)&&entryCandles.length>=36?entryCandles:candles).map(x=>({...x}));
  if(src.length<36)return;
@@ -539,6 +547,8 @@ function runAutoPaperTrade(){
  if(!candidate?.eligible||!candidate.fresh||candidate.extension>=0.85)return;
  const side=candidate.bias==='LONG'?'BUY':candidate.bias==='SHORT'?'SELL':'';if(!side)return;
  // Do not auto-enter when live wick/price pressure clearly conflicts with the setup direction.
+ const pxNow=Number(livePrice||0);
+ if(!(pxNow>0&&Number.isFinite(pxNow))){log(`AUTO WAIT · ${symbol} · harga ticker live tidak valid`);return;}
  const wickNow=forecastFromLastWick();
  if(wickNow?.direction==='POTENSI NAIK'&&side==='SELL'){log(`AUTO WAIT · ${symbol} · live pressure naik bertentangan dengan SELL`);return;}
  if(wickNow?.direction==='POTENSI TURUN'&&side==='BUY'){log(`AUTO WAIT · ${symbol} · live pressure turun bertentangan dengan BUY`);return;}
@@ -670,7 +680,20 @@ async function reconcileRealtime(){
   const changed=applyLiveKline({t:k.time,o:k.open,h:k.high,l:k.low,c:k.close,v:k.volume},targetSymbol,gen,'rest');
   lastRestSyncAt=Date.now();
   if(changed)setRealtimeStatus(`${marketProvider} · RECOVERY ${new Date(lastRestSyncAt).toLocaleTimeString('id-ID',{hour12:false})}`);
- }catch(e){if(gen===symbolGeneration&&targetSymbol===symbol)$('#conn').textContent=`${marketProvider} REST RECOVERY ERROR · ${e.message}`;}finally{restBusy=false}
+ }catch(e){
+  // Aborts can be intentional when pair/timeframe changes or an in-flight request
+  // is superseded. Do not report these as unexplained market failures.
+  const aborted=e?.name==='AbortError'||/aborted|signal is aborted/i.test(String(e?.message||e));
+  if(gen===symbolGeneration&&targetSymbol===symbol){
+   if(aborted){
+    $('#conn').textContent=`${marketProvider} REST RECOVERY · REQUEST CANCELLED · RETRY READY`;
+    log(`REST recovery request cancelled safely · ${targetSymbol} · ${normalizeTf(chartInterval)} · next retry scheduled`);
+   }else{
+    $('#conn').textContent=`${marketProvider} REST RECOVERY ERROR · ${String(e?.message||e).slice(0,100)}`;
+    log(`REST recovery failed · ${targetSymbol} · ${String(e?.message||e).slice(0,140)}`);
+   }
+  }
+ }finally{restBusy=false}
 }
 
 async function switchSymbol(s){
