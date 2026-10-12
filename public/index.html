@@ -164,7 +164,7 @@ async function scanCrossTimeframes(universe,activePosition){
   return false;
  }finally{multiTfBusy=false;}
 }
-const IDR=16000; const fmtP=n=>Number(n||0).toLocaleString('en-US',{maximumFractionDigits:priceDecimals(n)}); const fmtIDR=n=>'Rp '+Math.round(n||0).toLocaleString('id-ID');
+const IDR=16000; const fmtP=n=>Number(n||0).toLocaleString('en-US',{maximumFractionDigits:priceDecimals(n)}); const fmtIDR=n=>{const v=Number(n||0);const rounded=Math.round(v);return 'Rp '+(Math.abs(v)>0&&rounded===0?v.toLocaleString('id-ID',{minimumFractionDigits:2,maximumFractionDigits:2}):rounded.toLocaleString('id-ID'));};
 function priceDecimals(n){n=Math.abs(Number(n)||0);if(n>=1000)return 2;if(n>=100)return 3;if(n>=1)return 4;if(n>=0.1)return 5;if(n>=0.01)return 6;if(n>=0.001)return 7;return 8}
 function fmtTradeP(n){const d=priceDecimals(n);return Number(n||0).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d})}
 
@@ -857,7 +857,7 @@ function openPaper(side,forcedAnalysis=null){
   const margin=mode==='paper'?notional/Math.max(1,leverage):0;
   if(mode==='paper'&&margin>accountEquity+paperPnl){log(`ENTRY BLOCKED: margin ${fmtIDR(margin)} melebihi available balance`);syncPaperStateUI(a);return false;}
   if((side==='BUY'&&(sl>=p||tp<=p))||(side==='SELL'&&(sl<=p||tp>=p))){log('ENTRY BLOCKED: SL/TP tidak valid');$('#engineStatus').className='dangerbox';$('#engineStatus').textContent='NO TRADE · SL/TP tidak valid';return false}
-  paperPos={symbol,side,entry:p,qty,sl,tp,initialSL:sl,be:false,partial:false,trail:false,opened:Date.now(),risk,margin,leverage,notional,entryCandleTime:a.c.time,entryScore:a.score,entryBias:a.bias,peakPnl:0,autoTrailPeak:0,autoTrailActive:false,negativeScans:0};
+  paperPos={symbol,side,entry:p,qty,sl,tp,initialSL:sl,be:false,partial:false,trail:false,opened:Date.now(),risk:riskMoney,margin,leverage,notional,entryCandleTime:a.c.time,entryScore:a.score,entryBias:a.bias,peakPnl:0,autoTrailPeak:0,autoTrailActive:false,negativeScans:0};
   addTradeMarker('entry',paperPos); renderTradeVisuals(); persist(); syncPaperStateUI(a); log(`MANUAL PAPER ${side} ${symbol} · ENTRY ${fmtTradeP(p)} · SL awal ${fmtTradeP(sl)} · profit guard aktif setelah target awal, lalu BE + giveback 20% tanpa TP tetap · SCORE ${a.score.toFixed(0)}/100 · ANALISIS ${mode==='paper'&&entryCandles.length>=36?((TF_LABEL&&TF_LABEL[normalizeTf(chartInterval)])||normalizeTf(chartInterval))+' CLOSED':'CHART TF'}${tickerFresh?' · TICKER LIVE':' · HARGA CANDLE'}`); return true;
 }
 function renderPosition(pnl=0){if(!hasValidPaperPosition()){$('#position').innerHTML='<div class="muted">Tidak ada posisi.</div>';return}let p=paperPos;$('#position').innerHTML=`<div class="grid3"><div class="metric"><span class="muted">Side</span><b class="${p.side==='BUY'?'up':'down'}">${p.side} ${p.symbol}</b></div><div class="metric"><span class="muted">Entry</span><b>${fmtTradeP(p.entry)}</b></div><div class="metric"><span class="muted">Qty</span><b>${p.qty.toFixed(6)}</b></div></div><div class="grid3" style="margin-top:7px"><div class="metric"><span class="muted">Margin</span><b>${fmtIDR(p.margin||0)}</b></div><div class="metric"><span class="muted">Leverage</span><b>${Number(p.leverage||1)}x</b></div><div class="metric"><span class="muted">Position Size</span><b>${fmtIDR(p.notional||0)}</b></div></div><div class="grid3" style="margin-top:7px"><div class="metric"><span class="muted">SL</span><b>${fmtTradeP(p.sl)}</b></div><div class="metric"><span class="muted">TP</span><b>${p.autoTrailActive?'TANPA BATAS · TRAILING':fmtTradeP(p.tp)}</b></div><div class="metric"><span class="muted">PnL</span><b class="${pnl>=0?'up':'down'}">${fmtIDR(pnl)}</b></div></div><div class="kv"><span>BE / Partial / Trail</span><b>${p.be?'ON':'OFF'} / ${p.partial?'ON':'OFF'} / ${p.trail?'ON':'OFF'}</b></div><div class="kv"><span>Peak Profit / Giveback</span><b>${fmtIDR(p.peakPnl||0)} / ${PAPER_TRAIL_GIVEBACK_PCT}%${p.autoTrailActive?' · PROFIT RUNNER ON':' · menunggu profit target awal'}</b></div>`}
@@ -905,7 +905,7 @@ function updatePosition(price){
    const floor=p.autoTrailPeak*(1-PAPER_TRAIL_GIVEBACK_PCT/100);
    if(pnlIDR<=floor){log(`PROFIT GIVEBACK EXIT · ${p.symbol} · puncak ${fmtIDR(p.autoTrailPeak)} → sekarang ${fmtIDR(pnlIDR)} · batas turun ${PAPER_TRAIL_GIVEBACK_PCT}% dari puncak`);closePaper(price,null,'PROFIT GIVEBACK 20%');return}
  }
- if(pnlIDR<=-paperMaxRiskIDR(p)){const limit=paperMaxRiskIDR(p);log(`PAPER MAX RISK EXIT · ${p.symbol} · ${fmtIDR(pnlIDR)} · batas risiko ${fmtIDR(-limit)}`);closePaper(price,-limit,'PAPER MAX RISK');return}
+ if(pnlIDR<=-paperMaxRiskIDR(p)){const limit=paperMaxRiskIDR(p);log(`PAPER MAX RISK EXIT · ${p.symbol} · PnL bersih ${fmtIDR(pnlIDR)} · batas risiko ${fmtIDR(-limit)}`);closePaper(price,null,'PAPER MAX RISK');return}
  renderPosition(pnlIDR);updatePaperAccount(pnlIDR);renderTradeVisuals();
  // Setelah profit guard aktif, TP tetap dimatikan agar profit bisa berjalan; BE dan giveback menjaga hasil.
  const hitSL=p.side==='BUY'?price<=p.sl:price>=p.sl;
