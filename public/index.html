@@ -273,10 +273,10 @@ function timeSignalData(){
  const sellContinuation=bear&&prevBear&&mom<0&&prevMom<=0;
  const buyImpulse=bull&&bodyPct>=0.48&&mom>=0.16&&above&&emaUp;
  const sellImpulse=bear&&bodyPct>=0.48&&mom<=-0.16&&below&&emaDown;
- const buyOK=(buyContinuation||buyImpulse)&&above&&mom>0&&volumeRatio>=0.55&&notExtended&&!nearResistance&&a.regime!=='EXTREME VOLATILITY'&&!wickBearReject;
- const sellOK=(sellContinuation||sellImpulse)&&below&&mom<0&&volumeRatio>=0.55&&notExtended&&!nearSupport&&a.regime!=='EXTREME VOLATILITY'&&!wickBullReject;
- const buyScore=Math.min(100,(bull?14:0)+(prevBull?8:0)+(above?18:0)+(emaUp?16:0)+(mom>0?Math.min(18,Math.abs(mom)*10):0)+(volumeRatio>=0.55?8:0)+(notExtended?6:0)+(cleanBull?6:0)+(buyContinuation||buyImpulse?8:0));
- const sellScore=Math.min(100,(bear?14:0)+(prevBear?8:0)+(below?18:0)+(emaDown?16:0)+(mom<0?Math.min(18,Math.abs(mom)*10):0)+(volumeRatio>=0.55?8:0)+(notExtended?6:0)+(cleanBear?6:0)+(sellContinuation||sellImpulse?8:0));
+ const buyOK=(buyContinuation||buyImpulse)&&above&&mom>0&&volumeRatio>=0.55&&notExtended&&!nearResistance&&a.regime!=='EXTREME VOLATILITY';
+ const sellOK=(sellContinuation||sellImpulse)&&below&&mom<0&&volumeRatio>=0.55&&notExtended&&!nearSupport&&a.regime!=='EXTREME VOLATILITY';
+ const buyScore=Math.max(0,Math.min(100,(bull?14:0)+(prevBull?8:0)+(above?18:0)+(emaUp?16:0)+(mom>0?Math.min(18,Math.abs(mom)*10):0)+(volumeRatio>=0.55?8:0)+(notExtended?6:0)+(cleanBull?6:0)+(buyContinuation||buyImpulse?8:0)-(wickBearReject?4:0)));
+ const sellScore=Math.max(0,Math.min(100,(bear?14:0)+(prevBear?8:0)+(below?18:0)+(emaDown?16:0)+(mom<0?Math.min(18,Math.abs(mom)*10):0)+(volumeRatio>=0.55?8:0)+(notExtended?6:0)+(cleanBear?6:0)+(sellContinuation||sellImpulse?8:0)-(wickBullReject?4:0)));
  let side='HOLD',score=Math.max(buyScore,sellScore),reason='';
  if(buyOK&&buyScore>=55&&buyScore>=sellScore+5){side='BUY';score=buyScore;reason=(buyImpulse?'candle bullish kuat':'2 candle bullish searah')+' + harga di atas EMA20 + momentum positif; '+wickSignal;}
  else if(sellOK&&sellScore>=55&&sellScore>=buyScore+5){side='SELL';score=sellScore;reason=(sellImpulse?'candle bearish kuat':'2 candle bearish searah')+' + harga di bawah EMA20 + momentum negatif; '+wickSignal;}
@@ -332,48 +332,56 @@ function evaluateExitWarning(ts){
  try{if(navigator.vibrate)navigator.vibrate([180,80,180])}catch{}log(`EXIT WARNING · ${side} ${p.symbol} · candle ${tfLabel} menunjukkan pelemahan/arah berlawanan · manual only`);
 }
 function forecastFromLastWick(){
- // Probabilistic heuristic: evaluates the last 3 CLOSED candles of the selected timeframe.
+ // Context-aware wick reading: inspect the previous CLOSED candle, its follow-through,
+ // market regime, EMA slope, momentum and nearby support/resistance. A wick alone is not a signal.
  const src=entryCandles.length>=35?entryCandles:candles;
- const cs=src.slice(0,-1); if(cs.length<25)return null;
- const recent=cs.slice(-3); if(recent.length<3)return null;
- const c=recent[2],p=recent[1],p2=recent[0];
- const a=analyzeData(cs); if(!a||!a.A)return null;
- const shape=x=>{
-   const range=Math.max(x.high-x.low,Number.EPSILON);
-   const upper=(x.high-Math.max(x.open,x.close))/range;
-   const lower=(Math.min(x.open,x.close)-x.low)/range;
-   const closePos=(x.close-x.low)/range;
-   const body=Math.abs(x.close-x.open)/range;
-   return {range,upper,lower,closePos,body,bull:x.close>x.open,bear:x.close<x.open};
- };
- const sh=recent.map(shape), last=sh[2];
- const mom1=(c.close-p.close)/a.A, mom2=(p.close-p2.close)/a.A;
+ if(!Array.isArray(src)||src.length<30)return null;
+ const closed=src.slice(0,-1),live0=src.at(-1); if(closed.length<28)return null;
+ const a=analyzeData(closed); if(!a||!a.A)return null;
+ const live={...live0};
+ if(Number.isFinite(Number(livePrice))&&Number(livePrice)>0){live.close=Number(livePrice);live.high=Math.max(Number(live.high)||live.close,live.close);live.low=Math.min(Number(live.low)||live.close,live.close);}
+ const shape=x=>{const o=Number(x.open),c=Number(x.close),h=Number(x.high),l=Number(x.low),range=Math.max(h-l,Number.EPSILON),upper=(h-Math.max(o,c))/range,lower=(Math.min(o,c)-l)/range;return {open:o,close:c,high:h,low:l,range,upper,lower,closePos:(c-l)/range,body:Math.abs(c-o)/range,bull:c>o,bear:c<o};};
+ const recent=closed.slice(-3).map(shape),lastClosed=recent.at(-1),previous=recent.at(-2),older=recent.at(-3),liveShape=shape(live);
+ const atr=a.A||Math.max(lastClosed.close*.001,1);
+ const momNow=(Number(live.close)-lastClosed.close)/atr;
+ const momPrev=(lastClosed.close-previous.close)/atr;
+ const nearSupport=(lastClosed.close-a.support)/atr<0.7 && lastClosed.close>=a.support;
+ const nearResistance=(a.resistance-lastClosed.close)/atr<0.7 && lastClosed.close<=a.resistance;
  let bull=0,bear=0,why=[];
- // Weight the latest candle most, but require repeated evidence across 2-3 candles.
- const lowerReject=sh.filter(x=>x.lower>=.35&&x.lower>x.upper*1.15).length;
- const upperReject=sh.filter(x=>x.upper>=.35&&x.upper>x.lower*1.15).length;
- if(last.lower>=.38&&last.lower>last.upper*1.15){bull+=2;why.push('sumbu bawah candle terakhir dominan')}
- else if(lowerReject>=2){bull+=2;why.push('penolakan bawah berulang pada 2–3 candle')}
- if(last.upper>=.38&&last.upper>last.lower*1.15){bear+=2;why.push('sumbu atas candle terakhir dominan')}
- else if(upperReject>=2){bear+=2;why.push('penolakan atas berulang pada 2–3 candle')}
- // Close location of the last candle and recent candle sequence.
- if(last.closePos>=.68)bull++; else if(last.closePos<=.32)bear++;
- const greenCount=sh.filter(x=>x.bull).length, redCount=sh.filter(x=>x.bear).length;
- if(greenCount>=2)bull++; if(redCount>=2)bear++;
- // Avoid treating a wick alone as direction: confirm with trend and momentum.
- if(c.close>a.e&&a.emaSlope>0)bull++;
- if(c.close<a.e&&a.emaSlope<0)bear++;
- if(mom1>.10&&mom2>0)bull++;
- if(mom1<-.10&&mom2<0)bear++;
- // If upper/lower rejection are both frequent, mark as conflict.
- const mixedRejection=lowerReject>0&&upperReject>0;
- let direction='BELUM JELAS',strength='konfirmasi kurang';
- if(bull>=3&&bull>=bear+2&&!mixedRejection){direction='POTENSI NAIK';strength=bull>=5?'dukungan relatif kuat':'sedang'}
- else if(bear>=3&&bear>=bull+2&&!mixedRejection){direction='POTENSI TURUN';strength=bear>=5?'dukungan relatif kuat':'sedang'}
- else if(mixedRejection)why.push('sumbu atas dan bawah sama-sama muncul; pasar tarik-menarik');
- const summary=why.length?why.join('; '):'pola 2–3 candle belum menunjukkan penolakan dominan';
- return {direction,strength,summary,barTime:c.time,bull,bear,upper:last.upper,lower:last.lower,
-   upperReject,lowerReject,greenCount,redCount,mom1,mom2};
+ // Read wick from the previous closed candle, but require where it closed and what price did next.
+ const priorLowerReject=previous.lower>=.32 && previous.lower>previous.upper*1.12;
+ const priorUpperReject=previous.upper>=.32 && previous.upper>previous.lower*1.12;
+ const followBull=lastClosed.close>previous.high || (lastClosed.bull&&lastClosed.close>previous.close&&momPrev>0.05);
+ const followBear=lastClosed.close<previous.low || (lastClosed.bear&&lastClosed.close<previous.close&&momPrev<-.05);
+ if(priorLowerReject){bull+=followBull?2:0.8;why.push(followBull?'sumbu bawah candle sebelumnya diikuti pantulan':'sumbu bawah sebelumnya belum mendapat follow-through');}
+ if(priorUpperReject){bear+=followBear?2:0.8;why.push(followBear?'sumbu atas candle sebelumnya diikuti tekanan jual':'sumbu atas sebelumnya belum mendapat follow-through');}
+ // Most recent closed candle contributes body/close location; avoid treating a long wick as direction by itself.
+ if(lastClosed.bull&&lastClosed.closePos>=.65&&lastClosed.body>=.25)bull+=1.5;
+ if(lastClosed.bear&&lastClosed.closePos<=.35&&lastClosed.body>=.25)bear+=1.5;
+ if(lastClosed.upper>=.40&&lastClosed.closePos<.55)bear+=0.6;
+ if(lastClosed.lower>=.40&&lastClosed.closePos>.45)bull+=0.6;
+ // Market structure and strategy context.
+ if(lastClosed.close>a.e&&a.emaSlope>0)bull+=1.1;
+ if(lastClosed.close<a.e&&a.emaSlope<0)bear+=1.1;
+ if(momNow>0.08)bull+=momNow>0.35?1.2:0.6;
+ if(momNow<-.08)bear+=momNow<-.35?1.2:0.6;
+ if(lastClosed.close>previous.close&&previous.close>older.close)bull+=0.6;
+ if(lastClosed.close<previous.close&&previous.close<older.close)bear+=0.6;
+ // Nearby structure modifies the interpretation instead of forcing a directional prediction.
+ if(nearSupport){bull+=0.7;bear-=0.25;why.push('harga dekat support: potensi pantulan perlu dilihat dari follow-through');}
+ if(nearResistance){bear+=0.7;bull-=0.25;why.push('harga dekat resistance: potensi penolakan perlu dilihat dari follow-through');}
+ if(a.regime==='RANGE'){bull*=0.85;bear*=0.85;why.push('pasar ranging: arah sumbu lebih mudah gagal berlanjut');}
+ if(a.regime==='EXTREME VOLATILITY'){bull*=0.8;bear*=0.8;why.push('volatilitas ekstrem: wick bisa terbentuk akibat lonjakan sesaat');}
+ // Live candle is provisional: use it as a small update, not as stronger evidence than closed bars.
+ if(liveShape.closePos>=.78&&liveShape.bull&&liveShape.body>=.3)bull+=0.65;
+ else if(liveShape.closePos<=.22&&liveShape.bear&&liveShape.body>=.3)bear+=0.65;
+ const mixedRejection=(priorLowerReject&&priorUpperReject)||((lastClosed.upper>.35&&lastClosed.lower>.35));
+ let direction='BELUM JELAS',strength='bukti campuran';
+ if(bull>=2.6&&bull>=bear+0.7&&!mixedRejection){direction='POTENSI NAIK';strength=bull>=4.2?'dukungan relatif kuat':'sedang';}
+ else if(bear>=2.6&&bear>=bull+0.7&&!mixedRejection){direction='POTENSI TURUN';strength=bear>=4.2?'dukungan relatif kuat':'sedang';}
+ else if(mixedRejection)why.push('sumbu bertentangan; tunggu reaksi harga berikutnya');
+ else why.push('wick, follow-through, dan konteks tren belum sepakat');
+ return {direction,strength,summary:why.join('; '),barTime:live.time,bull:Math.max(0,bull),bear:Math.max(0,bear),upper:liveShape.upper,lower:liveShape.lower,upperReject:priorUpperReject?1:0,lowerReject:priorLowerReject?1:0,greenCount:recent.filter(x=>x.bull).length,redCount:recent.filter(x=>x.bear).length,mom1:momNow,mom2:momPrev,liveProvisional:true,regime:a.regime,nearSupport,nearResistance};
 }
 function wickForecastText(){const f=forecastFromLastWick(),tfLabel=(TF_LABEL&&TF_LABEL[normalizeTf(chartInterval)])||normalizeTf(chartInterval).toUpperCase();if(!f)return `Analisis sumbu: menunggu data candle ${tfLabel} yang cukup.`;return `Analisis sumbu candle ${tfLabel} terakhir: ${f.direction} (${f.strength}) untuk 1–3 candle berikutnya, kira-kira 5–15 menit. ${f.summary}. Ini bias teknikal, bukan kepastian; tunggu konfirmasi candle berikutnya.`}
 function renderWickForecast(){
@@ -403,10 +411,11 @@ function renderWickForecast(){
   {id:'wick15m',sub:'wick15mSub',up:longUp,down:longDown,desc:'bias lanjutan dari pola 3 candle; bukan jaminan'}
  ];
  rows.forEach(r=>{
+  const lead=Math.abs(r.up-r.down);
   const isUp=r.up>=r.down;
-  const label=isUp?'NAIK ▲':'TURUN ▼';
-  const score=clamp(50+Math.abs(r.up-r.down)*12);
-  const el=$('#'+r.id);if(el){el.textContent=label;el.style.color=isUp?'#19d59a':'#ff657a';}
+  const label=lead<1.25?'BELUM JELAS':(isUp?'NAIK ▲':'TURUN ▼');
+  const score=clamp(lead<1.25?50:50+lead*12);
+  const el=$('#'+r.id);if(el){el.textContent=label;el.style.color=lead<1.25?'#f4b942':(isUp?'#19d59a':'#ff657a');}
   const sub=$('#'+r.sub);if(sub)sub.textContent=`dukungan relatif ${score}/100 · ${r.desc}`;
  });
  const main=analyze();const horizonUp=midUp>=midDown;const forecastBias=horizonUp?'LONG':'SHORT';const agrees=main&&main.bias===forecastBias;const alignText=main?(agrees?'SELARAS · '+forecastBias:'BERLAWANAN · '+forecastBias+' vs '+main.bias):'BIAS BELUM ADA';
@@ -529,6 +538,11 @@ function runAutoPaperTrade(){
  const candidate=scoreEarlyPair(src);
  if(!candidate?.eligible||!candidate.fresh||candidate.extension>=0.85)return;
  const side=candidate.bias==='LONG'?'BUY':candidate.bias==='SHORT'?'SELL':'';if(!side)return;
+ // Do not auto-enter when live wick/price pressure clearly conflicts with the setup direction.
+ const wickNow=forecastFromLastWick();
+ if(wickNow?.direction==='POTENSI NAIK'&&side==='SELL'){log(`AUTO WAIT · ${symbol} · live pressure naik bertentangan dengan SELL`);return;}
+ if(wickNow?.direction==='POTENSI TURUN'&&side==='BUY'){log(`AUTO WAIT · ${symbol} · live pressure turun bertentangan dengan BUY`);return;}
+ if(wickNow?.direction==='BELUM JELAS'&&Number(candidate.score)<58){log(`AUTO WAIT · ${symbol} · arah sumbu/momentum belum konklusif`);return;}
  // Recheck direction and displacement at the exact moment of entry.
  const liveMove=(Number(live.close)-Number(live.open))/(Number(candidate.analysis?.A)||1);
  if((side==='BUY'&&liveMove<=0)||(side==='SELL'&&liveMove>=0)||Math.abs(liveMove)>0.45)return;
