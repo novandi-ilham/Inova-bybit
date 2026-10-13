@@ -3,7 +3,7 @@ class CanvasChart {
   constructor(host){
     this.host=host; host.innerHTML='';
     this.canvas=document.createElement('canvas'); this.canvas.className='chart'; host.appendChild(this.canvas);
-    this.ctx=this.canvas.getContext('2d'); this.candles=[]; this.ema=[]; this.markers=[]; this.position=null; this.srLevels=null; this.offset=0; this.visible=50; this.drag=false; this.lastX=0; this.pointers=new Map(); this.lastPinchDistance=0; this.lastTap=0; this.panStartOffset=0;
+    this.ctx=this.canvas.getContext('2d'); this.candles=[]; this.ema=[]; this.markers=[]; this.position=null; this.srLevels=null; this.brain=null; this.offset=0; this.visible=50; this.drag=false; this.lastX=0; this.pointers=new Map(); this.lastPinchDistance=0; this.lastTap=0; this.panStartOffset=0;
     this.series={setData:d=>{this.setCandles(d.map(x=>({...x,volume:0})))},update:d=>{this.updateCandle(d)},createPriceLine:o=>{const x={...o};this.positionLines??=[];this.positionLines.push(x);this.render();return x},removePriceLine:x=>{this.positionLines=(this.positionLines||[]).filter(y=>y!==x);this.render()},setMarkers:m=>{this.setMarkers(m)}};
     this.emaSeries={setData:d=>{this.ema=d.map(x=>x.value);this.render()},update:d=>{this.ema[this.candles.length-1]=d.value;this.render()}};
     this.resizeObserver=new ResizeObserver(()=>this.resize()); this.resizeObserver.observe(host); this.resize();
@@ -55,6 +55,7 @@ class CanvasChart {
   setMarkers(m){this.markers=Array.isArray(m)?m.slice(-50):[];this.render()}
   setPosition(p){this.position=p;this.render()}
   setSR(x){this.srLevels=x;this.render()}
+  setBrain(x){this.brain=x&&typeof x==='object'?x:null;this.render()}
   fitContent(){this.visible=Math.min(50,Math.max(30,this.candles.length));this.offset=0;this.clamp();this.render()}
   clamp(){const maxOffset=Math.max(0,this.candles.length-Math.max(30,Math.min(170,this.visible||90)));this.offset=Math.max(0,Math.min(this.offset,maxOffset))}
   distance(){const a=[...this.pointers.values()];if(a.length<2)return 0;return Math.hypot(a[0].x-a[1].x,a[0].y-a[1].y)}
@@ -98,10 +99,34 @@ class CanvasChart {
   line(x1,y1,x2,y2,stroke,w=1,dash=[]){const c=this.ctx;c.beginPath();c.setLineDash(dash);c.strokeStyle=stroke;c.lineWidth=w;c.moveTo(x1,y1);c.lineTo(x2,y2);c.stroke();c.setLineDash([])}
   text(t,x,y,fill='#9aa9bc',size=10,align='left'){const c=this.ctx;c.fillStyle=fill;c.font=`${size}px system-ui`;c.textAlign=align;c.fillText(t,x,y)}
   render(){const c=this.ctx,W=this.host.clientWidth,H=this.host.clientHeight;if(!W||!H)return;c.clearRect(0,0,W,H);c.fillStyle='rgba(5,10,16,.98)';c.fillRect(0,0,W,H);if(!this.candles.length){this.text('Menunggu candle Bybit Futures…',W/2,H/2,'#7f90a6',13,'center');return}const r=this.range(),cw=Math.max(2,(W-88)/r.vis*.62);for(let g=0;g<=5;g++){const y=8+g*(H-34)/5;this.line(48,y,W-40,y,'#132030');const v=r.hi-g*(r.hi-r.lo)/5;this.text(this.fmt(v),W-6,y+3,'#7f90a6',10,'right')}for(let i=0;i<r.cs.length;i++){const idx=r.start+i,q=r.cs[i],x=this.px(idx,r),yo=this.py(q.open,r),yc=this.py(q.close,r),yh=this.py(q.high,r),yl=this.py(q.low,r);const up=q.close>=q.open;this.line(x,yh,x,yl,up?'#19d59a':'#ff5c72',1);c.fillStyle=up?'#19d59a':'#ff5c72';c.fillRect(x-cw/2,Math.min(yo,yc),cw,Math.max(1,Math.abs(yc-yo)));if(this.ema.length){const ei=idx-(this.candles.length-this.ema.length);if(ei>0&&ei<this.ema.length){const prev=this.ema[ei-1];this.line(this.px(idx-1,r),this.py(prev,r),x,this.py(this.ema[ei],r),'#f4c44f',2)}}}
-    if(this.srLevels){for(const v of [this.srLevels.support,this.srLevels.resistance])if(Number.isFinite(v)){const y=this.py(v,r);this.line(48,y,W-40,y,'#4de1ff77',1,[5,5]);this.text(this.fmt(v),W-45,y-3,'#4de1ff',9,'right')}}
+    if(this.srLevels){
+      for(const [v,label,col] of [[this.srLevels.resistance,'R','#ffb65c'],[this.srLevels.support,'S','#4de1ff']])if(Number.isFinite(Number(v))&&Number(v)>0){const y=this.py(Number(v),r);this.line(48,y,W-40,y,col+'88',1,[5,5]);this.text(`${label} ${this.fmt(v)}`,W-45,y-4,col,9,'right')}
+    }
+    // H/L marks: visible-range extreme plus latest confirmed local swing points.
+    const visible=r.cs;
+    if(visible.length){
+      let hiIdx=0,loIdx=0;
+      for(let i=1;i<visible.length;i++){if(+visible[i].high>+visible[hiIdx].high)hiIdx=i;if(+visible[i].low<+visible[loIdx].low)loIdx=i;}
+      const h=visible[hiIdx],l=visible[loIdx],hx=this.px(r.start+hiIdx,r),hy=this.py(+h.high,r),lx=this.px(r.start+loIdx,r),ly=this.py(+l.low,r);
+      this.text('H',hx,Math.max(28,hy-9),'#ffb65c',12,'center');
+      this.text('L',lx,Math.min(H-38,ly+16),'#4de1ff',12,'center');
+      // Mark recent swing pivots to make higher-high/higher-low and lower-high/lower-low easier to read.
+      for(let i=1;i<visible.length-1;i++){
+        const q=visible[i],pr=visible[i-1],nx=visible[i+1],x=this.px(r.start+i,r);
+        if(+q.high>=+pr.high&&+q.high>+nx.high)this.text('H',x,Math.max(27,this.py(+q.high,r)-7),'#ffb65c',9,'center');
+        if(+q.low<=+pr.low&&+q.low<+nx.low)this.text('L',x,Math.min(H-35,this.py(+q.low,r)+13),'#4de1ff',9,'center');
+      }
+      // Trend line connects the two latest swing lows in rising structure or highs in falling structure.
+      const pivH=[],pivL=[];
+      for(let i=1;i<visible.length-1;i++){const q=visible[i],pr=visible[i-1],nx=visible[i+1];if(+q.high>=+pr.high&&+q.high>+nx.high)pivH.push({i,v:+q.high});if(+q.low<=+pr.low&&+q.low<+nx.low)pivL.push({i,v:+q.low});}
+      const rising=pivL.length>=2&&pivL.at(-1).v>=pivL.at(-2).v,falling=pivH.length>=2&&pivH.at(-1).v<=pivH.at(-2).v;
+      const pivots=rising?pivL:falling?pivH:(pivL.length>=2?pivL:pivH);
+      if(pivots.length>=2){const a=pivots.at(-2),b=pivots.at(-1);this.line(this.px(r.start+a.i,r),this.py(a.v,r),this.px(r.start+b.i,r),this.py(b.v,r),rising?'#19d59a99':falling?'#ff5c7299':'#f4c44f88',2,[4,3]);this.text(rising?'TREND ↑':falling?'TREND ↓':'TREND',this.px(r.start+b.i,r),Math.max(25,Math.min(H-35,this.py(b.v,r)+(rising?18:-10))),rising?'#19d59a':falling?'#ff5c72':'#f4c44f',9,'center');}
+    }
     if(this.position){for(const [v,col,label] of [[+this.position.entry,this.position.side==='BUY'?'#19d59a':'#ff5c72',this.position.side==='BUY'?'AUTO BUY':'AUTO SELL'],[+this.position.sl,'#ff5c72','SL'],[+this.position.tp,'#4de1ff','TP']])if(Number.isFinite(v)){const y=this.py(v,r);this.line(48,y,W-40,y,col,1,[7,5]);this.text(`${label} ${this.fmt(v)}`,W-45,y-4,col,9,'right')}}
     for(const m of this.markers){const idx=this.candles.findIndex(q=>q.time===Number(m.time));if(idx<r.start||idx>=r.end)continue;const q=this.candles[idx],x=this.px(idx,r),y=this.py(m.position==='aboveBar'?q.high:q.low,r)+(m.position==='aboveBar'?-14:14);this.text(m.shape==='arrowDown'?'▼':'▲',x,y,m.color||'#fff',13,'center');this.text(m.text||'',x,y+(m.position==='aboveBar'?-12:12),m.color||'#fff',8,'center')}
-    this.text(symbol||'',52,16,'#dfe8f2',11,'left');this.text('15M · BYBIT LINEAR · CANVAS',W-45,16,'#7f90a6',10,'right');
+    this.text(symbol||'',52,16,'#dfe8f2',11,'left');this.text('BYBIT LINEAR · CANVAS',W-45,16,'#7f90a6',10,'right');
+    if(this.brain){const b=this.brain,dir=b.direction||'NEUTRAL',col=dir==='LONG'?'#19d59a':dir==='SHORT'?'#ff5c72':'#f4c44f';const label=`BRAIN ${dir} · ${b.structure||'BUILDING'} · ${b.event||'NO BREAK'}`;c.fillStyle='rgba(5,10,16,.88)';c.fillRect(54,24,Math.min(W-110,Math.max(180,label.length*6.1)),18);this.text(label,60,37,col,10,'left');}
     const last=this.candles.at(-1);if(last)this.text(this.fmt(last.close),W-45,this.py(last.close,r)-5,last.close>=last.open?'#19d59a':'#ff5c72',10,'right');
   }
   fmt(v){const n=Number(v);if(!Number.isFinite(n))return '—';return n>=1000?n.toLocaleString('en-US',{maximumFractionDigits:2}):n.toLocaleString('en-US',{maximumFractionDigits:8})}
