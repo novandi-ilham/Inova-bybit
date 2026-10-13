@@ -860,7 +860,7 @@ function scoreEarlyPair(cs,timeframe=chartInterval){
  if(baseBias==='SHORT'&&maBull)reasons.push('MA50 menekan arah SELL');
  if(bias==='LONG'&&upper>.58)reasons.push('sumbu atas besar — risiko rejection');
  if(bias==='SHORT'&&lower>.58)reasons.push('sumbu bawah besar — risiko pantulan');
- const directionalOk=directionalCandle||pullbackTurn||(bias==='LONG'?recent>0:recent<0)||crossUp||crossDown;
+ const directionalCandle=bias==='LONG'?directionalCandleLong:directionalCandleShort; const directionalOk=directionalCandle||pullbackTurn||(bias==='LONG'?recent>0:recent<0)||crossUp||crossDown;
  // Conservative quality gate: score alone is never an entry permission. Require a clear
  // directional edge, fresh/non-extended momentum, liquidity, and no nearby S/R wall.
  const scoreGapOk=true; // score gap is not an entry gate
