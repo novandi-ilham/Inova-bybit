@@ -632,7 +632,7 @@ function runAutoPaperTrade(){
  const candleFresh=wsKlineFresh||restFresh;
  if(!candleFresh||!wsTickerFresh||!(Number(livePrice)>0)){
    const why=!wsTickerFresh?'ticker stale':!candleFresh?'kline WS + REST stale':'live price unavailable';
-   autoDiagnostic('DATA BELUM SEGAR',why);
+   autoDiagnostic('DATA BELUM SEGAR',why+' · scanner tetap mencari pair lain');
    return;
  }
  if(!(Number(livePrice)>0&&Date.now()-Number(lastWsTickerAt||0)<8000)){autoDiagnostic('TICKER KEDALUWARSA','menunggu update ticker terbaru');return;}
@@ -640,7 +640,7 @@ function runAutoPaperTrade(){
  if(src.length<36){autoDiagnostic('CANDLE KURANG',`${src.length}/36 candle`);return;}
  const live=src.at(-1);live.close=Number(livePrice);live.high=Math.max(Number(live.high)||Number(livePrice),Number(livePrice));live.low=Math.min(Number(live.low)||Number(livePrice),Number(livePrice));
  const candidate=scoreEarlyPair(src);
- if(!candidate){autoDiagnostic('BELUM ADA KANDIDAT','struktur/wick/momentum belum membentuk setup');return;}if(!(candidate.eligible||candidate.fresh&&candidate.score>=35)){autoDiagnostic('KANDIDAT BELUM LOLOS',`score ${Math.round(Number(candidate.score)||0)} · ${candidate.reason||candidate.trendDirection||'menunggu konfirmasi'}`);return;}if(candidate.extension>=1.60){autoDiagnostic('ENTRY TERLAMBAT',`extension ${Number(candidate.extension).toFixed(2)} ATR`);return;}autoDiagCandidates++;
+ if(!candidate){autoDiagnostic('BELUM ADA KANDIDAT','struktur/wick/momentum belum membentuk setup');return;}if(!(candidate.eligible||candidate.fresh&&candidate.score>=30)){autoDiagnostic('KANDIDAT BELUM LOLOS',`score ${Math.round(Number(candidate.score)||0)} · ${candidate.reason||candidate.trendDirection||'menunggu konfirmasi'}`);return;}if(candidate.extension>=1.85){autoDiagnostic('ENTRY TERLAMBAT',`extension ${Number(candidate.extension).toFixed(2)} ATR`);return;}autoDiagCandidates++;
  const side=candidate.bias==='LONG'?'BUY':candidate.bias==='SHORT'?'SELL':'';if(!side){autoDiagnostic('ARAH BELUM JELAS',String(candidate.bias||'NEUTRAL'));return;}
  // Do not auto-enter when live wick/price pressure clearly conflicts with the setup direction.
  const pxNow=Number(livePrice||0);
@@ -983,7 +983,7 @@ async function scan(){
   const all=(td?.result?.list||[]).filter(x=>/USDT$/.test(x.symbol)&&!x.symbol.includes('_')&&Number(x.turnover24h)>0&&x.symbol!=='USDCUSDT');
   const sorted=[...all].sort((a,b)=>Math.abs(Number(b.price24hPcnt))-Math.abs(Number(a.price24hPcnt)));
   const volume=[...all].sort((a,b)=>Number(b.turnover24h)-Number(a.turnover24h));
-  const universe=[...new Map([...volume.slice(0,18),...sorted.slice(0,6),...([...all].sort((a,b)=>Number(b.price24hPcnt)-Number(a.price24hPcnt)).slice(0,5)),...([...all].sort((a,b)=>Number(a.price24hPcnt)-Number(b.price24hPcnt)).slice(0,5)),...(all.filter(x=>x.symbol===symbol))].map(x=>[x.symbol,x])).values()].slice(0,30);
+  const universe=[...new Map([...volume.slice(0,30),...sorted.slice(0,12),...([...all].sort((a,b)=>Number(b.price24hPcnt)-Number(a.price24hPcnt)).slice(0,8)),...([...all].sort((a,b)=>Number(a.price24hPcnt)-Number(b.price24hPcnt)).slice(0,8)),...(all.filter(x=>x.symbol===symbol))].map(x=>[x.symbol,x])).values()].slice(0,50);
   const gainers=[...all].sort((a,b)=>Number(b.price24hPcnt)-Number(a.price24hPcnt)).slice(0,5), losers=[...all].sort((a,b)=>Number(a.price24hPcnt)-Number(b.price24hPcnt)).slice(0,5);
   $('#symbols').innerHTML=universe.map(x=>`<div class="sym ${x.symbol===symbol?'active':''}" data-s="${x.symbol}"><div><b>${x.symbol}</b><div class="muted">Vol ${(Number(x.turnover24h)/1e6).toFixed(1)}M</div></div><b class="${Number(x.price24hPcnt)>=0?'up':'down'}">${Number(x.price24hPcnt)>=0?'+':''}${(Number(x.price24hPcnt)*100).toFixed(2)}%</b></div>`).join('');
   $$('.sym').forEach(e=>e.onclick=()=>switchSymbol(e.dataset.s));
@@ -997,8 +997,8 @@ async function scan(){
  // candidate reflect current momentum rather than a stale cached kline or 24h leaderboard.
  const tickerPrice=Number(x.lastPrice);if(cs.length&&tickerPrice>0){const live=cs[cs.length-1];live.close=tickerPrice;live.high=Math.max(live.high,tickerPrice);live.low=Math.min(live.low,tickerPrice);}
  const scored=scoreEarlyPair(cs);if(scored)results[i]={symbol:x.symbol,...scored,change:Number(x.price24hPcnt)*100,volume:Number(x.turnover24h)};}catch{results[i]=null;}}};await Promise.all(Array.from({length:Math.min(9,universe.length)},worker));
-   const ranked=results.filter(x=>x&&(x.eligible||x.fresh||x.score>=35)&&!isPairLossBlocked(x.symbol)&&!(x.symbol===rotateAwaySymbol&&Date.now()<rotateAwayUntil)&&Number(manualPairSkipUntil[x.symbol]||0)<=Date.now()).map(x=>({...x,rankScore:x.score+(x.fresh?8:0)+(x.oscAligned?5:0)+(x.brainDirection===x.bias?5:0)+(String(x.marketEvent||'').startsWith('BOS')||String(x.marketEvent||'').startsWith('CHoCH')?4:0)-(x.oscConflict?12:0)-(x.extension>0.8?Math.min(16,(x.extension-0.8)*18):0)-(Math.abs(Number(x.change)||0)>12?Math.min(12,(Math.abs(Number(x.change)||0)-12)*0.5):0)+Math.min(4,Math.log10(Math.max(1,x.volume||1))-5)})).sort((a,b)=>(Number(b.eligible)-Number(a.eligible))||b.rankScore-a.rankScore),best=ranked.find(x=>x.eligible)||ranked[0],currentCandidate=ranked.find(x=>x.symbol===symbol),switchEdge=best?best.rankScore-(currentCandidate?.rankScore||0):0;
-  const top=ranked.slice(0,6);$('#scanCandidates').innerHTML=top.length?top.map((x,i)=>`<div class="scan-candidate" data-candidate="${x.symbol}"><div><b>${i+1}. ${x.symbol} · ${x.bias==='LONG'?'BUY/LONG':'SELL/SHORT'}</b><div class="rank">${x.eligible?'SETUP AWAL LAYAK':'BELUM SIAP'} · ${(TF_LABEL&&TF_LABEL[normalizeTf(chartInterval)])||normalizeTf(chartInterval)}</div></div><b class="score" style="color:${x.eligible?'#19d59a':'#f4c15d'}">${x.score}/100</b><div class="meta">${x.reason||'menunggu konfirmasi'} · STRUKTUR ${x.structure||'BUILDING'} · ${x.marketEvent||'NO BREAK'} · BB/OSC ${x.oscDirection||'—'} · EMA20 ${x.extension.toFixed(2)} ATR · volume x${Number(x.volRatio||0).toFixed(2)}</div></div>`).join(''):'<div class="muted small">Data scanner belum tersedia. Coba Refresh.</div>';$$('[data-candidate]').forEach(e=>e.onclick=()=>switchSymbol(e.dataset.candidate));
+   const ranked=results.filter(x=>x&&(x.eligible||x.fresh||x.score>=25)&&x.extension<2.25&&!isPairLossBlocked(x.symbol)&&!(x.symbol===rotateAwaySymbol&&Date.now()<rotateAwayUntil)&&Number(manualPairSkipUntil[x.symbol]||0)<=Date.now()).map(x=>({...x,rankScore:x.score+(x.fresh?8:0)+(x.oscAligned?5:0)+(x.brainDirection===x.bias?5:0)+(String(x.marketEvent||'').startsWith('BOS')||String(x.marketEvent||'').startsWith('CHoCH')?4:0)-(x.oscConflict?12:0)-(x.extension>0.8?Math.min(16,(x.extension-0.8)*18):0)-(Math.abs(Number(x.change)||0)>12?Math.min(12,(Math.abs(Number(x.change)||0)-12)*0.5):0)+Math.min(4,Math.log10(Math.max(1,x.volume||1))-5)})).sort((a,b)=>(Number(b.eligible)-Number(a.eligible))||b.rankScore-a.rankScore),best=ranked.find(x=>x.eligible)||ranked[0],currentCandidate=ranked.find(x=>x.symbol===symbol),switchEdge=best?best.rankScore-(currentCandidate?.rankScore||0):0;
+  const top=ranked.slice(0,8);$('#scanCandidates').innerHTML=top.length?top.map((x,i)=>`<div class="scan-candidate" data-candidate="${x.symbol}"><div><b>${i+1}. ${x.symbol} · ${x.bias==='LONG'?'BUY/LONG':'SELL/SHORT'}</b><div class="rank">${x.eligible?'SETUP AWAL LAYAK':'BELUM SIAP'} · ${(TF_LABEL&&TF_LABEL[normalizeTf(chartInterval)])||normalizeTf(chartInterval)}</div></div><b class="score" style="color:${x.eligible?'#19d59a':'#f4c15d'}">${x.score}/100</b><div class="meta">${x.reason||'menunggu konfirmasi'} · STRUKTUR ${x.structure||'BUILDING'} · ${x.marketEvent||'NO BREAK'} · BB/OSC ${x.oscDirection||'—'} · EMA20 ${x.extension.toFixed(2)} ATR · volume x${Number(x.volRatio||0).toFixed(2)}</div></div>`).join(''):'<div class="muted small">Data scanner belum tersedia. Coba Refresh.</div>';$$('[data-candidate]').forEach(e=>e.onclick=()=>switchSymbol(e.dataset.candidate));
    const active=mode==='paper'?hasValidPaperPosition():(mode==='demo'?hasValidDemoPosition():false);
    const activeSymbol=mode==='paper'?paperPos?.symbol:(mode==='demo'?currentDemoPosition()?.symbol:null);
    const current=active?analyze():null;
@@ -1032,6 +1032,14 @@ async function scan(){
         $('#scanState').textContent=`POSISI AKTIF · ${activeSymbol} · ${currentScore.toFixed(0)} · ${fmtIDR(holdPnl)} · reversal belum valid`;
       }
     }else $('#scanState').textContent=`POSISI AKTIF · ${activeSymbol} · ${currentScore.toFixed(0)} · ${fmtIDR(holdPnl)}`;
+   }else if(best&&Date.now()-lastSwitchAt>=HUNTER.cooldownMs&&(!best.eligible||!best.fresh||best.extension>1.5)){
+    // Keep hunting instead of freezing on the current pair: rotate to the best exploratory
+    // candidate even when it is not entry-ready. Entry still requires a separate live recheck.
+    const currentReady=!!(currentCandidate&&currentCandidate.eligible&&currentCandidate.fresh&&currentCandidate.extension<=1.5);
+    if(!currentReady&&best.symbol!==symbol&&Date.now()-lastSwitchAt>=6000){
+      const old=symbol;log(`PAIR HUNT ROTATION · ${old} → ${best.symbol} · exploratory score ${Math.round(best.score)} · entry belum diizinkan`);
+      await switchSymbol(best.symbol);lastSwitchAt=Date.now();$('#scanState').textContent=`HUNTING PAIR · ${best.symbol} · score ${Math.round(best.score)} · menunggu setup`;
+    }else $('#scanState').textContent=`HUNTING PAIR · ${ranked.length} kandidat · terbaik ${best.symbol} ${Math.round(best.score)} · belum entry`;
    }else if(best&&best.eligible&&best.fresh&&best.extension<=1.5&&Date.now()-lastSwitchAt>=HUNTER.cooldownMs){
     const target=best.symbol, targetBias=best.bias, targetScore=best.score;
     if(target!==symbol) await switchSymbol(target);
