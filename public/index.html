@@ -74,7 +74,7 @@ window.addEventListener('appinstalled',()=>{deferredInstallPrompt=null;const b=d
 document.addEventListener('click',async e=>{if(e.target?.id==='installBtn'&&deferredInstallPrompt){deferredInstallPrompt.prompt();await deferredInstallPrompt.userChoice;deferredInstallPrompt=null;e.target.style.display='none'}});
 if('serviceWorker' in navigator){window.addEventListener('load',()=>navigator.serviceWorker.register('/sw.js').catch(()=>{}))}
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
-let symbol='BTCUSDT',tf='15m',candles=[],entryCandles=[],chart,series,emaSeries,ws=null,drawings=[],tool='none',auto=false,autoTradeMode='manual',autoEntryLastKey='',autoEntryBusy=false,paperPos=null,demoPositions=[],demoPnl=0,paperPnl=0,dailyPnl=0,lossStreak=0,pairLossStreak={},pairCooldownUntil={},killed=false,accountEquity=10000000,mode='paper',srActive=false,tradeStats={wins:0,losses:0},tradeHistory=[],hunterBusy=false,lastHunterCandle=0,lastHunterSymbol='',lastSwitchAt=0,positionPriceLines=[],tradeMarkers=[],symbolGeneration=0,marketClockOffset=0,rotateAwaySymbol='',rotateAwayUntil=0,manualPairSkipUntil={},demoHistory=[],demoSyncAt=0,demoLastClosedAt=0;
+let symbol='BTCUSDT',tf='15m',candles=[],entryCandles=[],chart,series,emaSeries,ws=null,drawings=[],tool='none',auto=false,autoTradeMode='auto',autoEntryLastKey='',autoEntryBusy=false,paperPos=null,demoPositions=[],demoPnl=0,paperPnl=0,dailyPnl=0,lossStreak=0,pairLossStreak={},pairCooldownUntil={},killed=false,accountEquity=10000000,mode='paper',srActive=false,tradeStats={wins:0,losses:0},tradeHistory=[],hunterBusy=false,lastHunterCandle=0,lastHunterSymbol='',lastSwitchAt=0,positionPriceLines=[],tradeMarkers=[],symbolGeneration=0,marketClockOffset=0,rotateAwaySymbol='',rotateAwayUntil=0,manualPairSkipUntil={},demoHistory=[],demoSyncAt=0,demoLastClosedAt=0;
 // BYBIT-ONLY architecture: one exchange for market data, analysis and execution.
 const BYBIT_PUBLIC='https://api.bybit.id';
 const BYBIT_PUBLIC_FALLBACK='https://api.bybit.com';
@@ -150,7 +150,7 @@ async function scanCrossTimeframes(universe,activePosition){
   const jobs=[];for(const sym of symbols)for(const tf of tfList)jobs.push({sym,tf});
   const out=Array(jobs.length);let idx=0;const worker=async()=>{while(idx<jobs.length){const i=idx++,j=jobs[i];try{const raw=await getScannerKlines(j.sym,j.tf);const cs=raw.slice().reverse().map(k=>({time:Math.floor(Number(k[0])/1000),open:+k[1],high:+k[2],low:+k[3],close:+k[4],volume:+k[5]}));const score=scoreEarlyPair(cs);if(score)out[i]={symbol:j.sym,tf:j.tf,...score,rankScore:score.score+(score.oscAligned?5:0)-(score.oscConflict?12:0)-(score.extension>1.2?8:0)};}catch{out[i]=null;}}};
   await Promise.all(Array.from({length:Math.min(8,jobs.length)},worker));
-  const ranked=out.filter(x=>x&&x.eligible&&x.score>=58&&!x.oscConflict&&x.extension<1.4&&!isPairLossBlocked(x.symbol)&&!(x.symbol===rotateAwaySymbol&&Date.now()<rotateAwayUntil)&&Number(manualPairSkipUntil[x.symbol]||0)<=Date.now()).sort((a,b)=>b.rankScore-a.rankScore);
+  const ranked=out.filter(x=>x&&x.eligible&&x.score>=52&&!x.oscConflict&&x.extension<1.5&&!isPairLossBlocked(x.symbol)&&!(x.symbol===rotateAwaySymbol&&Date.now()<rotateAwayUntil)&&Number(manualPairSkipUntil[x.symbol]||0)<=Date.now()).sort((a,b)=>b.rankScore-a.rankScore);
   if(!ranked.length){$('#autoTfToggle').textContent='AUTO TF: ON · SCAN';return false;}
   const best=ranked[0],currentTf=normalizeTf(chartInterval),currentBest=ranked.filter(x=>x.tf===currentTf).sort((a,b)=>b.rankScore-a.rankScore)[0];
   const edge=currentBest?best.rankScore-currentBest.rankScore:99;
@@ -544,7 +544,7 @@ function runAutoPaperTrade(){
  if(src.length<36)return;
  const live=src.at(-1);live.close=Number(livePrice);live.high=Math.max(Number(live.high)||Number(livePrice),Number(livePrice));live.low=Math.min(Number(live.low)||Number(livePrice),Number(livePrice));
  const candidate=scoreEarlyPair(src);
- if(!candidate?.eligible||!candidate.fresh||candidate.extension>=0.85)return;
+ if(!candidate?.eligible||!candidate.fresh||candidate.extension>=0.95)return;
  const side=candidate.bias==='LONG'?'BUY':candidate.bias==='SHORT'?'SELL':'';if(!side)return;
  // Do not auto-enter when live wick/price pressure clearly conflicts with the setup direction.
  const pxNow=Number(livePrice||0);
@@ -813,10 +813,10 @@ function scoreEarlyPair(cs){
  // Keep the two-candle grace period conditional on live direction, low extension, and a
  // small current-candle move; never use it to justify chasing an exhausted impulse.
  const recentSignal=(crossUp&&bias==='LONG')||(crossDown&&bias==='SHORT')||withinTwoCandles;
- const fresh=(recentSignal||((Math.abs(recent)<0.65)&&directionalLive)||pullbackTurn)&&extension<0.85&&earlyWindow&&moveNotLate;
+ const fresh=(recentSignal||((Math.abs(recent)<0.65)&&directionalLive)||pullbackTurn)&&extension<0.95&&earlyWindow&&moveNotLate;
  const rejectionAgainst=(bias==='LONG'&&upper>.42&&upper>lower*1.25)||(bias==='SHORT'&&lower>.42&&lower>upper*1.25);
  const reasons=[];
- if(extension>=0.85)reasons.push('anti-chase: harga sudah menjauh dari EMA20');
+ if(extension>=0.95)reasons.push('anti-chase: harga sudah menjauh dari EMA20');
  if(!earlyWindow)reasons.push('terlambat: sinyal lebih dari 2 candle');
  if(!moveNotLate)reasons.push('terlambat: gerak candle sudah >0,45 ATR dari open');
  if(rejectionAgainst)reasons.push('wick rejection berlawanan dengan entry');
@@ -832,8 +832,8 @@ function scoreEarlyPair(cs){
  const directionalOk=directionalCandle||pullbackTurn||(bias==='LONG'?recent>0:recent<0)||crossUp||crossDown;
  // Conservative quality gate: score alone is never an entry permission. Require a clear
  // directional edge, fresh/non-extended momentum, liquidity, and no nearby S/R wall.
- const scoreGapOk=directionGap>=8;
- const volumeOk=volRatio>=0.65;
+ const scoreGapOk=directionGap>=5;
+ const volumeOk=volRatio>=0.55;
  const trendOk=bias==='LONG'?!maBear:!maBull;
  const srObstacle=bias==='LONG'?(nearResistance&&c.close<=priorHigh):(nearSupport&&c.close>=priorLow);
  const slPct=Math.max(0.01,Number(document.querySelector('#slPct')?.value)||0.2);
@@ -844,15 +844,15 @@ function scoreEarlyPair(cs){
  const netRewardPct=slPct*rrInput-roundTripCostPct;
  const netRiskPct=slPct+roundTripCostPct;
  const netRR=netRiskPct>0?netRewardPct/netRiskPct:0;
- const costsOk=netRewardPct>0&&netRR>=1.10;
- const eligible=score>=56&&scoreGapOk&&extension<0.70&&a.regime!=='EXTREME VOLATILITY'&&fresh&&directionalOk&&!oscConflict&&!rejectionAgainst&&volumeOk&&trendOk&&!srObstacle&&costsOk;
- if(!scoreGapOk)reasons.push('arah belum unggul minimal 8 poin');
- if(!volumeOk)reasons.push('volume belum cukup untuk konfirmasi');
+ const costsOk=netRewardPct>0&&netRR>=1.00;
+ const eligible=score>=52&&scoreGapOk&&extension<0.95&&a.regime!=='EXTREME VOLATILITY'&&fresh&&directionalOk&&!oscConflict&&!rejectionAgainst&&volumeOk&&trendOk&&!srObstacle&&costsOk;
+ if(!scoreGapOk)reasons.push('arah belum unggul minimal 5 poin');
+ if(!volumeOk)reasons.push('volume belum cukup untuk konfirmasi (min 0,55x)');
  if(!trendOk)reasons.push('arah berlawanan dengan tren MA50');
  if(srObstacle)reasons.push('hambatan support/resistance terlalu dekat');
- if(!costsOk)reasons.push(`target bersih tidak sebanding biaya (net R:R ${netRR.toFixed(2)}; perlu ≥1,10)`);
- if(score<56)reasons.push('skor kandidat di bawah 56');
- if(extension>=0.70)reasons.push('anti-chase: harga terlalu jauh dari EMA20');
+ if(!costsOk)reasons.push(`target bersih tidak sebanding biaya (net R:R ${netRR.toFixed(2)}; perlu ≥1,00)`);
+ if(score<52)reasons.push('skor kandidat di bawah 52');
+ if(extension>=0.95)reasons.push('anti-chase: harga terlalu jauh dari EMA20');
  return {score,bias,analysis:a,earlyScore:score,extension,fresh,eligible,directionGap,netRR,netRewardPct,netRiskPct,roundTripCostPct,signalAgeCandles:Number.isFinite(signalAgeCandles)?signalAgeCandles:null,oscDirection:osc.direction,oscAligned,oscConflict,maTrend:maBull?'BULLISH':maBear?'BEARISH':'NEUTRAL',nearFib,nearSupport,nearResistance,reason:eligible?'KANDIDAT TERFILTER · momentum + tren + biaya terkonfirmasi':reasons.slice(0,3).join(' · ')||'menunggu konfirmasi',closedTime:c.time,change:0,volume:0,upper,lower,volRatio};
 }
 async function scan(){
@@ -960,7 +960,7 @@ function syncPaperStateUI(a=null){
   if(statusEl){statusEl.className='warning';statusEl.textContent=`POSISI AKTIF · ${p.side} ${p.symbol} · Entry ${fmtTradeP(p.entry)}`;}
   return true;
 }
-function guard(){if(killed)return['kill switch aktif'];if(isPairLossBlocked(symbol))return[`PAIR ${symbol} DIHENTIKAN · 3 LOSS BERUNTUN`];if(hasValidPaperPosition()&&Number($('#maxPos').value)<=1)return['sudah ada posisi aktif'];if(dailyPnl<=-(accountEquity*Number($('#dailyLoss').value)/100))return['daily loss limit tercapai'];let a=analyze();return a&&!a.allowed?a.reasons:[]}
+function guard(){if(killed)return['kill switch aktif'];if(isPairLossBlocked(symbol))return[`PAIR ${symbol} DIHENTIKAN · pair dalam cooldown setelah loss`];if(hasValidPaperPosition())return['sudah ada posisi aktif'];if(dailyPnl<=-(accountEquity*Number($('#dailyLoss').value)/100))return['daily loss limit tercapai'];return []}
 function positionSize(price,sl){let risk=accountEquity*Number($('#risk').value)/100;let dist=Math.abs(price-sl);return dist?risk/dist:Number($('#qty').value)}
 function openPaper(side,forcedAnalysis=null){
   if(hasValidPaperPosition()){syncPaperStateUI();log(`ENTRY BLOCKED: sudah ada posisi ${paperPos.side} ${paperPos.symbol}`);return false}
@@ -1070,7 +1070,7 @@ async function submitOrder(side, options={}){
     // Final Signal is the authoritative entry decision. Do not hard-block a valid
     // displayed BUY/SELL because a second candidate scorer disagrees on a candle edge.
     if(!automaticCandidate&&!badgeText.startsWith(expectedSignal)){alert(`ENTRY DITAHAN · ${tfLabel}\nFinal Signal saat ini: ${badgeText||'WAIT'}. Tombol ${side} tidak akan melewati sinyal WAIT atau sinyal berlawanan.`);log(`ENTRY BLOCKED · ${side} · Final Signal ${badgeText||'WAIT'} · ${tfLabel}`);return}
-    if(automaticCandidate&&(!automaticCandidate.eligible||automaticCandidate.bias!==(side==='BUY'?'LONG':'SHORT')||!automaticCandidate.fresh||automaticCandidate.extension>=0.85)){log(`AUTO ENTRY DITAHAN · live early candidate tidak valid · ${tfLabel}`);return}
+    if(automaticCandidate&&(!automaticCandidate.eligible||automaticCandidate.bias!==(side==='BUY'?'LONG':'SHORT')||!automaticCandidate.fresh||automaticCandidate.extension>=0.95)){log(`AUTO ENTRY DITAHAN · live early candidate tidak valid · ${tfLabel}`);return}
     const entryCandidate=automaticCandidate||candidate;
     const candidateMismatch=!entryCandidate?.eligible||entryCandidate.bias!==(side==='BUY'?'LONG':'SHORT');
     if(candidateMismatch){const why=entryCandidate?.reason||'skor kandidat belum tersedia';if(automatic){log(`AUTO ENTRY DITAHAN · ${side} · kandidat belum lolos: ${why} · ${tfLabel}`);return;}if(!confirm(`PERINGATAN SETUP · ${tfLabel}\nFinal Signal menunjukkan ${side}, tetapi pemeriksa kandidat terpisah belum mengonfirmasi (${why}).\nLanjutkan PAPER secara manual?`)){log(`ENTRY CANCELLED · ${side} · candidate mismatch · ${tfLabel}`);return;}log(`ENTRY OVERRIDE CONFIRMED · ${side} · Final Signal selaras; candidate mismatch: ${why} · ${tfLabel}`)}
@@ -1185,6 +1185,6 @@ function initV25BybitUI(){
  updateBtHeader();loadBtOrderBook();clearInterval(btOrderBookTimer);btOrderBookTimer=setInterval(()=>{loadBtOrderBook();updateBtHeader()},2000);
 }
 
-(async()=>{killed=false;auto=true;autoTimeframe=true;autoTradeMode='manual';$('#autoTfToggle').textContent='AUTO TF: ON';$('#autoToggle').textContent='PAIR SCAN ONLY';$('#autoToggle').classList.add('active');$('#killBtn').textContent='ENTRY LOCK: OFF';$('#killBtn').classList.remove('active');initChart();restore();updatePairLossUI(symbol);renderPaperOrderPreview();$('#symbolTitle').textContent=symbol;symbolGeneration++;const bootGen=symbolGeneration;try{await diagnoseMarketAccess();await syncMarketClock();setInterval(syncMarketClock,30000);const historyOK=await loadCandles(symbol,bootGen);await loadEntryCandles(symbol,bootGen);if(bootGen===symbolGeneration){connectWS(symbol,bootGen);}renderPosition();initV25BybitUI();initV26IndicatorUI();if(historyOK)await scan();else { $('#scanState').textContent='BYBIT MARKET BLOCKED'; $('#conn').textContent=`MARKET UNAVAILABLE · ${marketDiagnostic.direct} · ${marketDiagnostic.proxy}`; }log('System ready · BYBIT LINEAR · '+(TF_LABEL[normalizeTf(chartInterval)]||chartInterval)+' · WebSocket-first · REST history/reconciliation')}catch(e){log('Init error: '+e.message);try{connectWS(symbol,bootGen)}catch{}}setInterval(updateUI,1000);setInterval(()=>{if(mode==='demo')account().catch(()=>{});},2000);setInterval(()=>{if(mode==='demo')fetchDemoHistory().catch(()=>{});},7000);setInterval(scan,HUNTER.scanMs)})();
+(async()=>{killed=false;auto=true;autoTimeframe=true;autoTradeMode='auto';$('#autoTfToggle').textContent='AUTO TF: ON';$('#autoToggle').textContent='PAIR SCAN ONLY';$('#autoToggle').classList.add('active');$('#killBtn').textContent='ENTRY LOCK: OFF';$('#killBtn').classList.remove('active');initChart();restore();updatePairLossUI(symbol);renderPaperOrderPreview();$('#symbolTitle').textContent=symbol;symbolGeneration++;const bootGen=symbolGeneration;try{await diagnoseMarketAccess();await syncMarketClock();setInterval(syncMarketClock,30000);const historyOK=await loadCandles(symbol,bootGen);await loadEntryCandles(symbol,bootGen);if(bootGen===symbolGeneration){connectWS(symbol,bootGen);}renderPosition();initV25BybitUI();initV26IndicatorUI();if(historyOK)await scan();else { $('#scanState').textContent='BYBIT MARKET BLOCKED'; $('#conn').textContent=`MARKET UNAVAILABLE · ${marketDiagnostic.direct} · ${marketDiagnostic.proxy}`; }log('System ready · BYBIT LINEAR · '+(TF_LABEL[normalizeTf(chartInterval)]||chartInterval)+' · PAPER AUTO ENTRY ON · scanner multi-pair + risk guard · WebSocket-first · REST history/reconciliation')}catch(e){log('Init error: '+e.message);try{connectWS(symbol,bootGen)}catch{}}setInterval(updateUI,1000);setInterval(()=>{if(mode==='demo')account().catch(()=>{});},2000);setInterval(()=>{if(mode==='demo')fetchDemoHistory().catch(()=>{});},7000);setInterval(scan,HUNTER.scanMs)})();
 
 </script></body></html>
