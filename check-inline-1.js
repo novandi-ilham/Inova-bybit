@@ -174,62 +174,42 @@ function timeSignalData(){
  const activeTf=normalizeTf(chartInterval),tfLabel=(TF_LABEL&&TF_LABEL[activeTf])||activeTf.toUpperCase();
  const src=entryCandles.length>=35?entryCandles:candles;
  if(src.length<35)return {side:'HOLD',score:0,decisionTime:src.at(-1)?.time||0,reason:`menunggu histori candle ${tfLabel}`};
- // Evaluate only fully closed candles; never use the live/forming candle for entry signals.
- const closed=src.slice(0,-1), a=analyzeData(closed);
+ // Use completed candles only. Read the last 3 candle bodies and wicks, then combine
+ // rejection evidence with trend/momentum; do not require every indicator to agree.
+ const closed=src.slice(0,-1),a=analyzeData(closed);
  if(!a)return {side:'HOLD',score:0,decisionTime:closed.at(-1)?.time||0,reason:'data belum cukup'};
- const c=closed.at(-1),prev=closed.at(-2),prev2=closed.at(-3),atrVal=a.A||Math.max(c.close*.001,1);
- const mom=(c.close-prev.close)/atrVal, prevMom=(prev.close-prev2.close)/atrVal;
- const bull=c.close>c.open,bear=c.close<c.open,prevBull=prev.close>prev.open,prevBear=prev.close<prev.open;
- const emaUp=a.emaSlope>0.025,emaDown=a.emaSlope<-.025,above=c.close>a.e,below=c.close<a.e;
- const extension=Math.abs(c.close-a.e)/atrVal,notExtended=extension<=0.95;
- const avgVol=closed.slice(-21,-1).reduce((sum,x)=>sum+(Number(x.volume)||0),0)/Math.max(1,closed.slice(-21,-1).length);
- const volumeRatio=avgVol>0?(Number(c.volume)||0)/avgVol:1;
- const range=Math.max(c.high-c.low,Number.EPSILON),body=Math.abs(c.close-c.open),bodyPct=body/range;
- const upperWick=c.high-Math.max(c.open,c.close),lowerWick=Math.min(c.open,c.close)-c.low;
- const upperRatio=upperWick/range,lowerRatio=lowerWick/range;
- const wickSignal=upperRatio>=0.45&&upperRatio>lowerRatio*1.35?'sumbu atas panjang: tekanan jual/penolakan di atas':lowerRatio>=0.45&&lowerRatio>upperRatio*1.35?'sumbu bawah panjang: tekanan beli/penolakan di bawah':upperRatio>=0.30&&lowerRatio>=0.30?'sumbu dua arah panjang: volatilitas/ragu-ragu':'sumbu relatif pendek: penolakan belum dominan';
- const wickBullReject=lowerRatio>=0.38&&lowerRatio>upperRatio*1.25;
- const wickBearReject=upperRatio>=0.38&&upperRatio>lowerRatio*1.25;
- const cleanBull=lowerWick<=body*1.5 && upperWick<=body*1.8;
- const cleanBear=upperWick<=body*1.5 && lowerWick<=body*1.8;
- const nearResistance=(a.resistance>c.close)&&((a.resistance-c.close)/atrVal<0.65);
- const nearSupport=(a.support<c.close)&&((c.close-a.support)/atrVal<0.65);
- // More selective setup: two same-direction closes, aligned EMA slope, meaningful momentum,
- // adequate relative volume, no stretched entry, and no immediate nearby S/R obstacle.
- // Balanced confirmation: avoid HOLD from an overly strict requirement that every filter
- // must pass at once. Keep closed candles only; allow either 2-candle continuation OR
- // a strong latest candle with momentum/EMA agreement. S/R and wick become score/risk
- // warnings rather than unconditional blockers unless the obstacle is very close.
- const buyContinuation=bull&&prevBull&&mom>0&&prevMom>=0;
- const sellContinuation=bear&&prevBear&&mom<0&&prevMom<=0;
- const buyImpulse=bull&&bodyPct>=0.48&&mom>=0.16&&above&&emaUp;
- const sellImpulse=bear&&bodyPct>=0.48&&mom<=-0.16&&below&&emaDown;
- const buyOK=(buyContinuation||buyImpulse)&&above&&mom>0&&volumeRatio>=0.55&&notExtended&&!nearResistance&&a.regime!=='EXTREME VOLATILITY';
- const sellOK=(sellContinuation||sellImpulse)&&below&&mom<0&&volumeRatio>=0.55&&notExtended&&!nearSupport&&a.regime!=='EXTREME VOLATILITY';
- const buyScore=Math.max(0,Math.min(100,(bull?14:0)+(prevBull?8:0)+(above?18:0)+(emaUp?16:0)+(mom>0?Math.min(18,Math.abs(mom)*10):0)+(volumeRatio>=0.55?8:0)+(notExtended?6:0)+(cleanBull?6:0)+(buyContinuation||buyImpulse?8:0)-(wickBearReject?4:0)));
- const sellScore=Math.max(0,Math.min(100,(bear?14:0)+(prevBear?8:0)+(below?18:0)+(emaDown?16:0)+(mom<0?Math.min(18,Math.abs(mom)*10):0)+(volumeRatio>=0.55?8:0)+(notExtended?6:0)+(cleanBear?6:0)+(sellContinuation||sellImpulse?8:0)-(wickBullReject?4:0)));
- let side='HOLD',score=Math.max(buyScore,sellScore),reason='';
- if(buyOK&&buyScore>=55&&buyScore>=sellScore+5){side='BUY';score=buyScore;reason=(buyImpulse?'candle bullish kuat':'2 candle bullish searah')+' + harga di atas EMA20 + momentum positif; '+wickSignal;}
- else if(sellOK&&sellScore>=55&&sellScore>=buyScore+5){side='SELL';score=sellScore;reason=(sellImpulse?'candle bearish kuat':'2 candle bearish searah')+' + harga di bawah EMA20 + momentum negatif; '+wickSignal;}
- else {
-  const why=[];
-  if(!notExtended)why.push('harga terlalu jauh dari EMA20 — hindari mengejar harga');
-  if(nearResistance&&bull)why.push('harga dekat resistance');
-  if(nearSupport&&bear)why.push('harga dekat support');
-  if(volumeRatio<0.55)why.push('volume sangat rendah');
-  if(!emaUp&&!emaDown)why.push('EMA20 datar');
-  if(Math.abs(mom)<0.08)why.push('momentum lemah');
-  if(wickBearReject)why.push('sumbu atas dominan: risiko penolakan turun');
-  if(wickBullReject)why.push('sumbu bawah dominan: risiko pantulan naik');
-  if(a.regime==='EXTREME VOLATILITY')why.push('volatilitas ekstrem');
-  if(buyScore<55&&sellScore<55)why.push('skor kedua arah di bawah 55');
-  if(Math.abs(buyScore-sellScore)<5)why.push('arah BUY/SELL belum unggul minimal 5 poin');
-  if(!why.length)why.push('konfirmasi candle dan momentum belum searah');
-  reason=why.join(' · ')+' · '+wickSignal;
+ const c=closed.at(-1),p1=closed.at(-2),p2=closed.at(-3),atr=Math.max(a.A||0,c.close*.0005,Number.EPSILON);
+ const candles3=[p2,p1,c];
+ const stats=candles3.map(x=>{const r=Math.max(x.high-x.low,Number.EPSILON),b=Math.abs(x.close-x.open),u=x.high-Math.max(x.open,x.close),l=Math.min(x.open,x.close)-x.low;return {bull:x.close>x.open,bear:x.close<x.open,body:b/r,upper:u/r,lower:l/r,closePos:(x.close-x.low)/r};});
+ const s=stats[2],s1=stats[1],s2=stats[0];
+ const mom=(c.close-p1.close)/atr,prevMom=(p1.close-p2.close)/atr;
+ const above=c.close>=a.e,below=c.close<a.e,emaUp=(a.emaSlope||0)>0,emaDown=(a.emaSlope||0)<0;
+ // A lower wick is evidence of buyers rejecting lower prices; an upper wick is
+ // evidence of sellers rejecting higher prices. Multiple recent wicks carry more weight.
+ let buy=0,sell=0;
+ buy+=(above?2:0)+(emaUp?2:0)+(mom>0?Math.min(3,Math.abs(mom)*1.5):0)+(prevMom>0?1:0);
+ sell+=(below?2:0)+(emaDown?2:0)+(mom<0?Math.min(3,Math.abs(mom)*1.5):0)+(prevMom<0?1:0);
+ for(const q of stats){
+   if(q.lower>=.28&&q.lower>q.upper*1.12)buy+=1.7;
+   if(q.upper>=.28&&q.upper>q.lower*1.12)sell+=1.7;
+   if(q.bull&&q.closePos>.62)buy+=.7;
+   if(q.bear&&q.closePos<.38)sell+=.7;
  }
- return {side,score,decisionTime:c.time,reason,momentum:mom,ema:a.e,close:c.close,extension,volumeRatio,upperWick:upperRatio,lowerWick:lowerRatio,wickSignal,wickBullReject,wickBearReject};
+ // Give recent candles more weight and penalize clear rejection against the direction.
+ if(s.lower>=.35&&s.lower>s.upper*1.15)buy+=1.2;
+ if(s.upper>=.35&&s.upper>s.lower*1.15)sell+=1.2;
+ if(s.bull&&s.body>=.35)buy+=.6;
+ if(s.bear&&s.body>=.35)sell+=.6;
+ const range=Math.max(c.high-c.low,Number.EPSILON),upper=(c.high-Math.max(c.open,c.close))/range,lower=(Math.min(c.open,c.close)-c.low)/range;
+ const mixed=Math.abs(buy-sell)<1.1 && Math.abs(mom)<.08 && Math.abs(c.close-c.open)/range<.12;
+ let side='HOLD',score=Math.round(50+Math.min(45,Math.abs(buy-sell)*5)),reason='sumbu 3 candle dan momentum belum memberi arah dominan';
+ if(!mixed && buy>=sell+1.1){side='BUY';score=Math.min(95,Math.round(52+(buy-sell)*5));reason=`BUY: ${above?'harga di atas EMA20':'pantulan/penolakan bawah'}; ${emaUp?'tren EMA naik':mom>0?'momentum naik':'konfirmasi momentum dari candle'}; sumbu bawah ${(lower*100).toFixed(0)}% candle terakhir`+(sell>buy-2?' — waspadai tekanan jual':'');}
+ else if(!mixed && sell>=buy+1.1){side='SELL';score=Math.min(95,Math.round(52+(sell-buy)*5));reason=`SELL: ${below?'harga di bawah EMA20':'penolakan atas'}; ${emaDown?'tren EMA turun':mom<0?'momentum turun':'konfirmasi momentum dari candle'}; sumbu atas ${(upper*100).toFixed(0)}% candle terakhir`+(buy>sell-2?' — waspadai pantulan beli':'');}
+ else if(buy>sell){side='BUY';score=Math.min(75,Math.round(50+(buy-sell)*4));reason='BUY awal: sumbu bawah/tekanan beli lebih dominan, konfirmasi tren belum kuat';}
+ else if(sell>buy){side='SELL';score=Math.min(75,Math.round(50+(sell-buy)*4));reason='SELL awal: sumbu atas/tekanan jual lebih dominan, konfirmasi tren belum kuat';}
+ const avgVol=closed.slice(-21,-1).reduce((z,x)=>z+(Number(x.volume)||0),0)/Math.max(1,closed.slice(-21,-1).length),volumeRatio=avgVol>0?(Number(c.volume)||0)/avgVol:1;
+ return {side,score,decisionTime:c.time,reason,momentum:mom,ema:a.e,close:c.close,extension:Math.abs(c.close-a.e)/atr,volumeRatio,upperWick:upper,lowerWick:lower,wickSignal:lower>upper*1.15?'sumbu bawah dominan':upper>lower*1.15?'sumbu atas dominan':'sumbu campuran',wickBullReject:lower>=.35&&lower>upper*1.15,wickBearReject:upper>=.35&&upper>lower*1.15};
 }
-
 let lastExitNoticeKey='',exitNoticeTimer=0;
 function activeManagedPosition(){
  if(hasValidPaperPosition())return {symbol:paperPos.symbol,side:paperPos.side,entry:Number(paperPos.entry),source:'PAPER'};
