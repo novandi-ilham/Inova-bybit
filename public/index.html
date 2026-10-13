@@ -132,30 +132,30 @@ async function fetchMarketKlines(symbolName,limit=150,interval=chartInterval){co
 async function nowMarketMs(){return Date.now()+marketClockOffset;}
 async function syncMarketClock(){try{const d=await bybitPublic('/v5/market/time');const sec=Number(d?.result?.timeSecond);if(Number.isFinite(sec))marketClockOffset=sec*1000-Date.now();}catch{}}
 const DEFAULT_PAPER_MARGIN_IDR=500000; const DEFAULT_LEVERAGE=10;
-const HUNTER={minConfidence:0,switchAdvantage:6,scanMs:3500,candidateCount:36,cooldownMs:3500};
+const HUNTER={minConfidence:0,switchAdvantage:3,scanMs:2500,candidateCount:30,cooldownMs:1200};
 const PAIR_LOSS_COOLDOWN_MS=30*60*1000;
 const HARD_RISK_PCT=0.20;
 const LONG_PREFERENCE_GAP=6;
 const scannerKlineCache=new Map();
 let autoTimeframe=true,lastMultiTfScanAt=0,lastTfSwitchAt=0,multiTfBusy=false;
-async function getScannerKlines(sym,interval=chartInterval){const tf=normalizeTf(interval),cacheKey=tf+':'+sym;const hit=scannerKlineCache.get(cacheKey);if(hit&&Date.now()-hit.at<6500)return hit.data;const d=await bybitPublic('/v5/market/kline',{category:'linear',symbol:sym,interval:tfApi(tf),limit:'80'});const data=d?.result?.list||[];if(!data.length)throw new Error('Bybit kline kosong');scannerKlineCache.set(cacheKey,{at:Date.now(),data});return data;}
+async function getScannerKlines(sym,interval=chartInterval){const tf=normalizeTf(interval),cacheKey=tf+':'+sym;const hit=scannerKlineCache.get(cacheKey);if(hit&&Date.now()-hit.at<2800)return hit.data;const d=await bybitPublic('/v5/market/kline',{category:'linear',symbol:sym,interval:tfApi(tf),limit:'80'});const data=d?.result?.list||[];if(!data.length)throw new Error('Bybit kline kosong');scannerKlineCache.set(cacheKey,{at:Date.now(),data});return data;}
 async function scanCrossTimeframes(universe,activePosition){
- if(!autoTimeframe||!auto||killed||activePosition||multiTfBusy||Date.now()-lastMultiTfScanAt<6000||Date.now()-lastTfSwitchAt<9000)return false;
+ if(!autoTimeframe||!auto||killed||activePosition||multiTfBusy||Date.now()-lastMultiTfScanAt<3500||Date.now()-lastTfSwitchAt<4500)return false;
  multiTfBusy=true;lastMultiTfScanAt=Date.now();
  try{
   const tfList=[...new Set(['3m','5m','15m','30m','1h',normalizeTf(chartInterval)])];
   const volumeRank=[...universe].sort((a,b)=>Number(b.turnover24h)-Number(a.turnover24h));
   const movers=[...universe].sort((a,b)=>Math.abs(Number(b.price24hPcnt))-Math.abs(Number(a.price24hPcnt)));
-  const symbols=[...new Set([...volumeRank.slice(0,8).map(x=>x.symbol),...movers.slice(0,4).map(x=>x.symbol),symbol])].slice(0,12);
+  const symbols=[...new Set([...volumeRank.slice(0,8).map(x=>x.symbol),...movers.slice(0,4).map(x=>x.symbol),symbol])].slice(0,10);
   const jobs=[];for(const sym of symbols)for(const tf of tfList)jobs.push({sym,tf});
   const out=Array(jobs.length);let idx=0;const worker=async()=>{while(idx<jobs.length){const i=idx++,j=jobs[i];try{const raw=await getScannerKlines(j.sym,j.tf);const cs=raw.slice().reverse().map(k=>({time:Math.floor(Number(k[0])/1000),open:+k[1],high:+k[2],low:+k[3],close:+k[4],volume:+k[5]}));const score=scoreEarlyPair(cs,j.tf);if(score)out[i]={symbol:j.sym,tf:j.tf,...score,rankScore:score.score+(score.oscAligned?5:0)-(score.oscConflict?12:0)-(score.extension>1.2?8:0)};}catch{out[i]=null;}}};
-  await Promise.all(Array.from({length:Math.min(12,jobs.length)},worker));
-  const ranked=out.filter(x=>x&&x.eligible&&x.score>=52&&!x.oscConflict&&x.extension<1.5&&!isPairLossBlocked(x.symbol)&&!(x.symbol===rotateAwaySymbol&&Date.now()<rotateAwayUntil)&&Number(manualPairSkipUntil[x.symbol]||0)<=Date.now()).sort((a,b)=>b.rankScore-a.rankScore);
+  await Promise.all(Array.from({length:Math.min(8,jobs.length)},worker));
+  const ranked=out.filter(x=>x&&x.eligible&&x.score>=42&&!x.oscConflict&&x.extension<1.65&&!isPairLossBlocked(x.symbol)&&!(x.symbol===rotateAwaySymbol&&Date.now()<rotateAwayUntil)&&Number(manualPairSkipUntil[x.symbol]||0)<=Date.now()).sort((a,b)=>b.rankScore-a.rankScore);
   if(!ranked.length){$('#autoTfToggle').textContent='AUTO TF: ON · SCAN';$('#scanState').textContent=`SCAN MULTI-TF · ${symbols.length} pair × ${tfList.length} TF · belum ada setup yang lolos`;return false;}
   const best=ranked[0],currentTf=normalizeTf(chartInterval),currentBest=ranked.filter(x=>x.tf===currentTf).sort((a,b)=>b.rankScore-a.rankScore)[0];
   const edge=currentBest?best.rankScore-currentBest.rankScore:99;
-  if(best.tf===currentTf||edge<8){$('#autoTfToggle').textContent=`AUTO TF: ON · ${TF_LABEL[currentTf]||currentTf}`;return false;}
-  if(best.rankScore<58)return false;
+  if(best.tf===currentTf||edge<4){$('#autoTfToggle').textContent=`AUTO TF: ON · ${TF_LABEL[currentTf]||currentTf}`;return false;}
+  if(best.rankScore<42)return false;
   const oldSymbol=symbol,oldTf=currentTf;
   $('#scanState').textContent=`AUTO TF → ${best.symbol} · ${TF_LABEL[best.tf]||best.tf} · ${best.bias} ${best.score}`;
   if(best.symbol!==symbol)await switchSymbol(best.symbol);
@@ -880,7 +880,7 @@ async function scan(){
   const all=(td?.result?.list||[]).filter(x=>/USDT$/.test(x.symbol)&&!x.symbol.includes('_')&&Number(x.turnover24h)>0&&x.symbol!=='USDCUSDT');
   const sorted=[...all].sort((a,b)=>Math.abs(Number(b.price24hPcnt))-Math.abs(Number(a.price24hPcnt)));
   const volume=[...all].sort((a,b)=>Number(b.turnover24h)-Number(a.turnover24h));
-  const universe=[...new Map([...volume.slice(0,18),...sorted.slice(0,6),...([...all].sort((a,b)=>Number(b.price24hPcnt)-Number(a.price24hPcnt)).slice(0,5)),...([...all].sort((a,b)=>Number(a.price24hPcnt)-Number(b.price24hPcnt)).slice(0,5)),...(all.filter(x=>x.symbol===symbol))].map(x=>[x.symbol,x])).values()].slice(0,36);
+  const universe=[...new Map([...volume.slice(0,18),...sorted.slice(0,6),...([...all].sort((a,b)=>Number(b.price24hPcnt)-Number(a.price24hPcnt)).slice(0,5)),...([...all].sort((a,b)=>Number(a.price24hPcnt)-Number(b.price24hPcnt)).slice(0,5)),...(all.filter(x=>x.symbol===symbol))].map(x=>[x.symbol,x])).values()].slice(0,30);
   const gainers=[...all].sort((a,b)=>Number(b.price24hPcnt)-Number(a.price24hPcnt)).slice(0,5), losers=[...all].sort((a,b)=>Number(a.price24hPcnt)-Number(b.price24hPcnt)).slice(0,5);
   $('#symbols').innerHTML=universe.map(x=>`<div class="sym ${x.symbol===symbol?'active':''}" data-s="${x.symbol}"><div><b>${x.symbol}</b><div class="muted">Vol ${(Number(x.turnover24h)/1e6).toFixed(1)}M</div></div><b class="${Number(x.price24hPcnt)>=0?'up':'down'}">${Number(x.price24hPcnt)>=0?'+':''}${(Number(x.price24hPcnt)*100).toFixed(2)}%</b></div>`).join('');
   $$('.sym').forEach(e=>e.onclick=()=>switchSymbol(e.dataset.s));
@@ -911,8 +911,8 @@ async function scan(){
     // a meaningful opposite momentum score, and a current-candle move in the new direction.
     if(mode==='paper'&&autoTradeMode==='auto'&&paperPos&&best&&Date.now()-Number(lastWsTickerAt||0)<5000&&Date.now()-Number(lastWsKlineAt||0)<5000){
       const oldSide=paperPos.side, oppositeBias=oldSide==='BUY'?'SHORT':'LONG';
-      const reverse=ranked.find(x=>x.eligible&&x.fresh&&x.bias===oppositeBias&&x.score>=48&&x.extension<=1.25&&x.symbol!==rotateAwaySymbol&&!(x.symbol===rotateAwaySymbol&&Date.now()<rotateAwayUntil));
-      const samePair=ranked.find(x=>x.symbol===paperPos.symbol&&x.eligible&&x.fresh&&x.bias===oppositeBias&&x.score>=48&&x.extension<=1.25);
+      const reverse=ranked.find(x=>x.eligible&&x.fresh&&x.bias===oppositeBias&&x.score>=40&&x.extension<=1.45&&x.symbol!==rotateAwaySymbol&&!(x.symbol===rotateAwaySymbol&&Date.now()<rotateAwayUntil));
+      const samePair=ranked.find(x=>x.symbol===paperPos.symbol&&x.eligible&&x.fresh&&x.bias===oppositeBias&&x.score>=40&&x.extension<=1.45);
       const pick=[samePair,reverse].filter(Boolean).sort((a,b)=>b.rankScore-a.rankScore)[0];
       const live=Number(livePrice), candle=(entryCandles.length?entryCandles:candles).at(-1);
       const liveConfirms=!!(pick&&candle&&live>0&&((pick.bias==='LONG'&&live>Number(candle.open))||(pick.bias==='SHORT'&&live<Number(candle.open))));
@@ -929,7 +929,7 @@ async function scan(){
         $('#scanState').textContent=`POSISI AKTIF · ${activeSymbol} · ${currentScore.toFixed(0)} · ${fmtIDR(holdPnl)} · reversal belum valid`;
       }
     }else $('#scanState').textContent=`POSISI AKTIF · ${activeSymbol} · ${currentScore.toFixed(0)} · ${fmtIDR(holdPnl)}`;
-   }else if(best&&best.score>=38&&best.fresh&&best.extension<=1.5&&Date.now()-lastSwitchAt>=Math.min(HUNTER.cooldownMs,2500)){
+   }else if(best&&best.score>=38&&best.fresh&&best.extension<=1.5&&Date.now()-lastSwitchAt>=HUNTER.cooldownMs){
     const target=best.symbol, targetBias=best.bias, targetScore=best.score;
     if(target!==symbol) await switchSymbol(target);
     const fresh=analyze();
