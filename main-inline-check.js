@@ -442,7 +442,7 @@ function runAutoPaperTrade(){
  const side=candidate.bias==='LONG'?'BUY':candidate.bias==='SHORT'?'SELL':'';if(!side)return;
  // Recheck direction and displacement at the exact moment of entry.
  const liveMove=(Number(live.close)-Number(live.open))/(Number(candidate.analysis?.A)||1);
- if((side==='BUY'&&liveMove<=0)||(side==='SELL'&&liveMove>=0)||Math.abs(liveMove)>0.45)return;
+ if((side==='BUY'&&liveMove<=0)||(side==='SELL'&&liveMove>=0)||Math.abs(liveMove)>0.80)return;
  const key=[symbol,tf,live.time,side].join(':');if(key===autoEntryLastKey)return;
  const guardReasons=guard();if(guardReasons.length){$('#engineStatus').textContent='AUTO WAIT · '+guardReasons.slice(0,2).join(' · ');return;}
  autoEntryLastKey=key;autoEntryBusy=true;
