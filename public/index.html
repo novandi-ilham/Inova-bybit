@@ -550,10 +550,15 @@ function runAutoPaperTrade(){
  const data=String($('#wickDataStatus')?.textContent||'');
  // Entry needs a fresh websocket kline AND ticker. REST recovery may keep chart
  // visible, but should not trigger an automatic entry from stale/mixed prices.
- const wsKlineFresh=!!lastWsKlineAt&&Date.now()-lastWsKlineAt<5000;
- const wsTickerFresh=!!lastWsTickerAt&&Date.now()-lastWsTickerAt<5000;
- if(!data.startsWith('LIVE')||!wsKlineFresh||!wsTickerFresh){
-   if(autoTradeMode==='auto') log(`AUTO WAIT · ${symbol} · data belum segar (kline ${wsKlineFresh?'OK':'stale'}, ticker ${wsTickerFresh?'OK':'stale'})`);
+ const wsKlineFresh=!!lastWsKlineAt&&Date.now()-lastWsKlineAt<12000;
+ const wsTickerFresh=!!lastWsTickerAt&&Date.now()-lastWsTickerAt<8000;
+ const restFresh=!!lastRestSyncAt&&Date.now()-lastRestSyncAt<12000;
+ // Accept a recently reconciled REST candle when the WS kline stream is recovering,
+ // but never enter with both candle sources stale or with a stale ticker.
+ const candleFresh=wsKlineFresh||restFresh;
+ if(!candleFresh||!wsTickerFresh||!(Number(livePrice)>0)){
+   const why=!wsTickerFresh?'ticker stale':!candleFresh?'kline WS + REST stale':'live price unavailable';
+   $('#engineStatus').textContent='AUTO WAIT · '+why;
    return;
  }
  if(!(Number(livePrice)>0&&Date.now()-Number(lastWsTickerAt||0)<8000))return;
@@ -561,7 +566,7 @@ function runAutoPaperTrade(){
  if(src.length<36)return;
  const live=src.at(-1);live.close=Number(livePrice);live.high=Math.max(Number(live.high)||Number(livePrice),Number(livePrice));live.low=Math.min(Number(live.low)||Number(livePrice),Number(livePrice));
  const candidate=scoreEarlyPair(src);
- if(!candidate?.eligible||!candidate.fresh||candidate.extension>=1.30)return;
+ if(!candidate?.eligible||!candidate.fresh||candidate.extension>=1.45)return;
  const side=candidate.bias==='LONG'?'BUY':candidate.bias==='SHORT'?'SELL':'';if(!side)return;
  // Do not auto-enter when live wick/price pressure clearly conflicts with the setup direction.
  const pxNow=Number(livePrice||0);
