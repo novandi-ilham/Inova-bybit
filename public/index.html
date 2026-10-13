@@ -78,7 +78,7 @@ let symbol='BTCUSDT',tf='15m',candles=[],entryCandles=[],chart,series,emaSeries,
 // BYBIT-ONLY architecture: one exchange for market data, analysis and execution.
 const BYBIT_PUBLIC='https://api.bybit.id';
 const BYBIT_PUBLIC_FALLBACK='https://api.bybit.com';
-const BYBIT_WS='wss://stream.bybit.id/v5/public/linear';
+const BYBIT_WS='wss://stream.bybit.com/v5/public/linear';
 let marketSource='DIRECT';
 let marketProvider='BYBIT';
 let marketDiagnostic={direct:'NOT_TESTED',proxy:'NOT_TESTED',directStatus:null,proxyStatus:null,error:''};
@@ -591,7 +591,7 @@ function redraw(){
  }catch(e){log('Chart render error: '+e.message)}
  updateUI();
 }
-let wsReconnectTimer=null, wsWatchdogTimer=null, realtimeFallbackTimer=null, wsGeneration=0, lastWsKlineAt=0, lastWsTickerAt=0, lastWsSource='NONE', lastRestSyncAt=0, lastRestKlineTime=0, restBusy=false, marketSeq=0, livePrice=0, liveMarkPrice=0, livePriceRaf=0;
+let wsReconnectTimer=null, wsWatchdogTimer=null, realtimeFallbackTimer=null, wsHeartbeatTimer=null, wsGeneration=0, wsOpenedAt=0, lastWsKlineAt=0, lastWsTickerAt=0, lastWsSource='NONE', lastRestSyncAt=0, lastRestKlineTime=0, restBusy=false, marketSeq=0, livePrice=0, liveMarkPrice=0, livePriceRaf=0;
 function cacheKey(s=symbol){return `ilhamMarketCandles:${marketProvider}:${s}:${normalizeTf(chartInterval)}`}
 function saveCandleCache(s=symbol){try{if(candles.length>=30)localStorage.setItem(cacheKey(s),JSON.stringify({savedAt:Date.now(),candles:candles.slice(-150)}))}catch{}}
 function loadCandleCache(s=symbol){try{const x=JSON.parse(localStorage.getItem(cacheKey(s)||'')||'null');if(!x||!Array.isArray(x.candles)||x.candles.length<30)return false;const age=Date.now()-Number(x.savedAt||0);if(age>12*60*60*1000)return false;candles=x.candles.map(c=>({...c,time:Number(c.time)})).filter(c=>[c.time,c.open,c.high,c.low,c.close,c.volume].every(Number.isFinite)).slice(-150);redraw();return candles.length>=30}catch{return false}}
@@ -657,48 +657,60 @@ function setRealtimeStatus(extra=''){
 }
 function scheduleWsReconnect(gen,targetSymbol){
  clearTimeout(wsReconnectTimer);
- wsReconnectTimer=setTimeout(()=>{if(gen===wsGeneration&&gen===symbolGeneration&&targetSymbol===symbol)connectWS(targetSymbol,gen)},1200);
+ wsReconnectTimer=setTimeout(()=>{if(gen===symbolGeneration&&targetSymbol===symbol)connectWS(targetSymbol,gen)},1200);
 }
 function connectWS(targetSymbol=symbol,gen=symbolGeneration){
- const wsGen=++wsGeneration;clearTimeout(wsReconnectTimer);clearInterval(wsWatchdogTimer);try{ws?.close()}catch{};lastWsKlineAt=0;lastWsTickerAt=0;livePrice=0;liveMarkPrice=0;const klineStream=`kline.${tfApi()}.${targetSymbol.toUpperCase()}`,entryStream=klineStream,tickerStream=`tickers.${targetSymbol.toUpperCase()}`;lastWsSource='BYBIT LINEAR';$('#conn').textContent=`BYBIT WS CONNECTING · ${lastWsSource} · TICKER LIVE + KLINE`;
- try{ws=new WebSocket(BYBIT_WS);ws.onopen=()=>{if(wsGen!==wsGeneration||gen!==symbolGeneration)return;ws.send(JSON.stringify({op:'subscribe',args:[...new Set([klineStream,entryStream,tickerStream])]}));$('#conn').textContent='BYBIT WS CONNECTED · WAITING FOR TICKER/KLINE'};ws.onmessage=ev=>{if(wsGen!==wsGeneration||gen!==symbolGeneration)return;try{const m=JSON.parse(ev.data);if((m.topic===klineStream||m.topic===entryStream)&&Array.isArray(m.data)&&m.data[0]){const q=m.data[0];if(m.topic===entryStream)applyEntryKline({t:q.start,o:q.open,h:q.high,l:q.low,c:q.close,v:q.volume},targetSymbol,gen);if(m.topic===klineStream){lastWsKlineAt=Date.now();const ok=applyLiveKline({t:q.start,o:q.open,h:q.high,l:q.low,c:q.close,v:q.volume},targetSymbol,gen,'ws');if(ok)setRealtimeStatus(lastWsSource)}}else if(m.topic===tickerStream&&m.data){const q=Array.isArray(m.data)?m.data[0]:m.data;const px=Number(q.lastPrice||q.markPrice||0),mark=Number(q.markPrice||q.lastPrice||0);if(px>0){livePrice=px;liveMarkPrice=mark;lastWsTickerAt=Date.now();if(lastWsKlineAt&&Date.now()-lastWsKlineAt<12000)setRealtimeStatus(lastWsSource);else $('#conn').textContent='BYBIT TICKER LIVE · KLINE WAITING / REST FALLBACK';requestLivePnL();}}}catch{}};ws.onerror=()=>{if(wsGen===wsGeneration)$('#conn').textContent='BYBIT WS ERROR · TICKER/REST FALLBACK'};ws.onclose=()=>{if(wsGen===wsGeneration){clearInterval(wsWatchdogTimer);$('#conn').textContent='BYBIT WS RECONNECTING · TICKER + REST';scheduleWsReconnect(gen,targetSymbol)}};wsWatchdogTimer=setInterval(()=>{if(wsGen!==wsGeneration||gen!==symbolGeneration)return;if(ws?.readyState===1&&lastWsKlineAt&&Date.now()-lastWsKlineAt>12000){$('#conn').textContent='BYBIT WS STALE · RECOVERY READY';try{ws.close()}catch{}}},2000);clearInterval(realtimeFallbackTimer);realtimeFallbackTimer=setInterval(()=>{if(gen===symbolGeneration&&targetSymbol===symbol)reconcileRealtime().catch(()=>{})},5000)}catch(e){$('#conn').textContent='BYBIT WS FAILED · REST SYNC ACTIVE';scheduleWsReconnect(gen,targetSymbol)}}
+ const wsGen=++wsGeneration;clearTimeout(wsReconnectTimer);clearInterval(wsWatchdogTimer);clearInterval(wsHeartbeatTimer);try{ws?.close()}catch{};lastWsKlineAt=0;lastWsTickerAt=0;wsOpenedAt=0;livePrice=0;liveMarkPrice=0;const klineStream=`kline.${tfApi()}.${targetSymbol.toUpperCase()}`,entryStream=klineStream,tickerStream=`tickers.${targetSymbol.toUpperCase()}`;lastWsSource='BYBIT LINEAR';$('#conn').textContent=`BYBIT WS CONNECTING · ${lastWsSource} · TICKER + KLINE`;
+ try{
+  ws=new WebSocket(BYBIT_WS);
+  ws.onopen=()=>{if(wsGen!==wsGeneration||gen!==symbolGeneration)return;wsOpenedAt=Date.now();try{ws.send(JSON.stringify({op:'subscribe',args:[...new Set([klineStream,entryStream,tickerStream])]}));}catch{}$('#conn').textContent='BYBIT WS CONNECTED · WAITING FOR MARKET DATA';
+   clearInterval(wsHeartbeatTimer);wsHeartbeatTimer=setInterval(()=>{if(wsGen!==wsGeneration||gen!==symbolGeneration)return;if(ws?.readyState===1){try{ws.send(JSON.stringify({op:'ping'}))}catch{try{ws.close()}catch{}}}},20000);
+  };
+  ws.onmessage=ev=>{if(wsGen!==wsGeneration||gen!==symbolGeneration)return;try{const m=JSON.parse(ev.data);if(m.op==='pong'||m.ret_msg==='pong')return;if((m.topic===klineStream||m.topic===entryStream)&&Array.isArray(m.data)&&m.data[0]){const q=m.data[0];if(m.topic===entryStream)applyEntryKline({t:q.start,o:q.open,h:q.high,l:q.low,c:q.close,v:q.volume},targetSymbol,gen);if(m.topic===klineStream){const ok=applyLiveKline({t:q.start,o:q.open,h:q.high,l:q.low,c:q.close,v:q.volume},targetSymbol,gen,'ws');if(ok){lastWsKlineAt=Date.now();setRealtimeStatus(lastWsSource)}}}else if(m.topic===tickerStream&&m.data){const q=Array.isArray(m.data)?m.data[0]:m.data;const px=Number(q.lastPrice||q.markPrice||0),mark=Number(q.markPrice||q.lastPrice||0);if(px>0){livePrice=px;liveMarkPrice=mark;lastWsTickerAt=Date.now();if(lastWsKlineAt&&Date.now()-lastWsKlineAt<12000)setRealtimeStatus(lastWsSource);else $('#conn').textContent='BYBIT TICKER LIVE · KLINE RECOVERY ACTIVE';requestLivePnL();}}}catch(e){log('WS message parse/update error: '+String(e?.message||e).slice(0,100))}};
+  ws.onerror=()=>{if(wsGen===wsGeneration)$('#conn').textContent='BYBIT WS ERROR · REST RECOVERY ACTIVE'};
+  ws.onclose=()=>{if(wsGen===wsGeneration){clearInterval(wsWatchdogTimer);clearInterval(wsHeartbeatTimer);$('#conn').textContent='BYBIT WS RECONNECTING · REST RECOVERY ACTIVE';scheduleWsReconnect(gen,targetSymbol)}};
+  wsWatchdogTimer=setInterval(()=>{if(wsGen!==wsGeneration||gen!==symbolGeneration)return;const now=Date.now();const noKline=lastWsKlineAt?now-lastWsKlineAt>12000:(wsOpenedAt&&now-wsOpenedAt>12000);const noTicker=lastWsTickerAt?now-lastWsTickerAt>15000:(wsOpenedAt&&now-wsOpenedAt>15000);if(ws?.readyState===1&&(noKline||noTicker)){if(noKline)$('#conn').textContent='BYBIT WS STALE · REST RECOVERY ACTIVE';try{ws.close()}catch{}}},2000);
+  clearInterval(realtimeFallbackTimer);realtimeFallbackTimer=setInterval(()=>{if(gen===symbolGeneration&&targetSymbol===symbol)reconcileRealtime().catch(()=>{})},3000);
+ }catch(e){$('#conn').textContent='BYBIT WS FAILED · REST RECOVERY ACTIVE';scheduleWsReconnect(gen,targetSymbol)}
+}
 function requestLivePnL(){if(livePriceRaf)return;livePriceRaf=requestAnimationFrame(()=>{livePriceRaf=0;const px=livePrice||analyze()?.c?.close||paperPos?.entry||0;if(px>0){$('#lastPrice').textContent=fmtP(px);if(mode==='paper'&&hasValidPaperPosition())updatePosition(px);else if(mode==='paper')updatePaperAccount(0);if(mode==='demo')updateDemoLiveUnrealized(liveMarkPrice||px);}})}
 function demoPnlForPosition(p){if(!p)return 0;const exchangeUpl=Number(p.unrealisedPnl);const entry=Number(p.avgPrice||0),qty=demoPositionQty(p),dir=demoPositionSide(p)==='BUY'?1:-1;const mark=p.symbol===symbol&&Number(liveMarkPrice)>0?Number(liveMarkPrice):Number(p.markPrice||0);if(entry>0&&qty>0&&mark>0)return (mark-entry)*qty*dir*IDR;return (Number.isFinite(exchangeUpl)?exchangeUpl:0)*IDR}
 function updateDemoLiveUnrealized(price){const p=currentDemoPosition();if(!p)return;const upl=demoPnlForPosition(p),side=demoPositionSide(p);$('#unrealized').textContent=fmtIDR(upl);$('#perfLive').textContent=`Posisi ${side} ${p.symbol} · Entry ${fmtTradeP(Number(p.avgPrice||0))} · Unrealized ${fmtIDR(upl)}${p.symbol===symbol&&Number(price)>0?' · LIVE':''}`;const grids=$$('#position .grid3');const pnlEl=grids[1]?.querySelectorAll('.metric')[1]?.querySelector('b');if(pnlEl){pnlEl.textContent=fmtIDR(upl);pnlEl.className=upl>=0?'up':'down';}return upl}
 
 async function reconcileRealtime(){
  if(restBusy||!candles.length)return;
- // REST is deliberately NOT polled continuously. It is only a recovery path
- // when the WebSocket is disconnected or has stopped delivering kline updates.
- const wsHealthy=!!(ws&&ws.readyState===1&&lastWsKlineAt&&Date.now()-lastWsKlineAt<8000);
+ const wsHealthy=!!(ws&&ws.readyState===1&&lastWsKlineAt&&Date.now()-lastWsKlineAt<8000&&lastWsTickerAt&&Date.now()-lastWsTickerAt<10000);
  if(wsHealthy)return;
- const targetSymbol=symbol,gen=symbolGeneration,seq=++marketSeq; restBusy=true;
+ const targetSymbol=symbol,gen=symbolGeneration,seq=++marketSeq;restBusy=true;
  try{
-  const d=marketProvider==='BYBIT'?await fetchBybitKlines(targetSymbol,2,chartInterval):await fetchMarketKlines(targetSymbol,2,chartInterval);
+  // REST recovery fetches both the active candle and ticker. Kline-only recovery
+  // can leave PnL frozen when the WebSocket ticker stream is dead.
+  const results=await Promise.allSettled([
+   fetchBybitKlines(targetSymbol,2,chartInterval),
+   bybitPublic('/v5/market/tickers',{category:'linear',symbol:targetSymbol.toUpperCase()})
+  ]);
   if(seq!==marketSeq||gen!==symbolGeneration||targetSymbol!==symbol)return;
-  const k=Array.isArray(d)&&d.length?d[d.length-1]:null; if(!k)throw new Error('Realtime kline kosong');
-  // fetchBybitKlines returns candle timestamps in SECONDS, while applyLiveKline
-  // accepts Bybit WebSocket timestamps in MILLISECONDS. Convert explicitly;
-  // otherwise REST recovery creates a 1970-era candle and the visible chart freezes.
-  const changed=applyLiveKline({t:Number(k.time)*1000,o:k.open,h:k.high,l:k.low,c:k.close,v:k.volume},targetSymbol,gen,'rest');
-  // Keep the entry-analysis candle stream aligned with REST recovery as well.
-  applyEntryKline({t:Number(k.time)*1000,o:k.open,h:k.high,l:k.low,c:k.close,v:k.volume},targetSymbol,gen);
-  lastRestSyncAt=Date.now();
-  if(changed)setRealtimeStatus(`${marketProvider} · REST RECOVERY ${new Date(lastRestSyncAt).toLocaleTimeString('id-ID',{hour12:false})}`);
-  else if(Number(k.time)>=Number(candles.at(-1)?.time||0))$('#conn').textContent=`${marketProvider} REST RECOVERY · DATA CHECKED · CHART UNCHANGED`;
+  let klineUpdated=false, tickerUpdated=false, errors=[];
+  if(results[0].status==='fulfilled'){
+   const arr=results[0].value,k=Array.isArray(arr)&&arr.length?arr[arr.length-1]:null;
+   if(k){
+    const changed=applyLiveKline({t:Number(k.time)*1000,o:k.open,h:k.high,l:k.low,c:k.close,v:k.volume},targetSymbol,gen,'rest');
+    applyEntryKline({t:Number(k.time)*1000,o:k.open,h:k.high,l:k.low,c:k.close,v:k.volume},targetSymbol,gen);
+    klineUpdated=!!changed;lastRestKlineTime=Math.max(lastRestKlineTime,Number(k.time)||0);
+   }else errors.push('kline kosong');
+  }else errors.push('kline: '+String(results[0].reason?.message||results[0].reason||'gagal'));
+  if(results[1].status==='fulfilled'){
+   const list=results[1].value?.result?.list||[],q=list[0]||{},px=Number(q.lastPrice||0),mark=Number(q.markPrice||q.lastPrice||0);
+   if(px>0){livePrice=px;liveMarkPrice=mark;lastRestSyncAt=Date.now();tickerUpdated=true;requestLivePnL();}
+   else errors.push('ticker kosong');
+  }else errors.push('ticker: '+String(results[1].reason?.message||results[1].reason||'gagal'));
+  if(klineUpdated||tickerUpdated){
+   const age=Math.max(0,Date.now()-lastRestSyncAt);
+   $('#conn').textContent=`BYBIT REST RECOVERY · ${tickerUpdated?'TICKER OK':'TICKER STALE'} · ${klineUpdated?'CANDLE UPDATED':'CANDLE UNCHANGED'} · ${Math.round(age/1000)}s`;
+  }else $('#conn').textContent=`BYBIT REST RECOVERY FAILED · ${errors.join(' · ').slice(0,130)}`;
  }catch(e){
-  // Aborts can be intentional when pair/timeframe changes or an in-flight request
-  // is superseded. Do not report these as unexplained market failures.
   const aborted=e?.name==='AbortError'||/aborted|signal is aborted/i.test(String(e?.message||e));
-  if(gen===symbolGeneration&&targetSymbol===symbol){
-   if(aborted){
-    $('#conn').textContent=`${marketProvider} REST RECOVERY · REQUEST CANCELLED · RETRY READY`;
-    log(`REST recovery request cancelled safely · ${targetSymbol} · ${normalizeTf(chartInterval)} · next retry scheduled`);
-   }else{
-    $('#conn').textContent=`${marketProvider} REST RECOVERY ERROR · ${String(e?.message||e).slice(0,100)}`;
-    log(`REST recovery failed · ${targetSymbol} · ${String(e?.message||e).slice(0,140)}`);
-   }
-  }
+  if(gen===symbolGeneration&&targetSymbol===symbol){$('#conn').textContent=`BYBIT REST RECOVERY ${aborted?'CANCELLED':'ERROR'} · ${String(e?.message||e).slice(0,100)}`;if(!aborted)log(`REST recovery failed · ${targetSymbol} · ${String(e?.message||e).slice(0,140)}`)}
  }finally{restBusy=false}
 }
 
@@ -770,6 +782,7 @@ function scoreEarlyPair(cs){
  const bias=long>=short?'LONG':'SHORT';
  if(nearFib){if(bias==='LONG'&&c.close>=prev.close)long+=3;else if(bias==='SHORT'&&c.close<=prev.close)short+=3;}
  const score=Math.round(Math.max(long,short));
+ const directionGap=Math.abs(long-short);
  // Fresh continuation and pullback entries are both candidates; reject late extensions.
  const directionalCandle=bias==='LONG'?(c.close>c.open&&recent>0):(c.close<c.open&&recent<0);
  const pullbackTurn=bias==='LONG'?(lower>upper*1.15&&c.close>prev.close):(upper>lower*1.15&&c.close<prev.close);
@@ -817,8 +830,30 @@ function scoreEarlyPair(cs){
  if(bias==='LONG'&&upper>.58)reasons.push('sumbu atas besar — risiko rejection');
  if(bias==='SHORT'&&lower>.58)reasons.push('sumbu bawah besar — risiko pantulan');
  const directionalOk=directionalCandle||pullbackTurn||(bias==='LONG'?recent>0:recent<0)||crossUp||crossDown;
- const eligible=score>=42&&extension<0.85&&a.regime!=='EXTREME VOLATILITY'&&fresh&&directionalOk&&!oscConflict&&!rejectionAgainst;
- return {score,bias,analysis:a,earlyScore:score,extension,fresh,eligible,signalAgeCandles:Number.isFinite(signalAgeCandles)?signalAgeCandles:null,oscDirection:osc.direction,oscAligned,oscConflict,maTrend:maBull?'BULLISH':maBear?'BEARISH':'NEUTRAL',nearFib,nearSupport,nearResistance,reason:eligible?'KANDIDAT AWAL · momentum + BB/oscillator diperiksa':reasons.slice(0,2).join(' · ')||'menunggu konfirmasi',closedTime:c.time,change:0,volume:0,upper,lower,volRatio};
+ // Conservative quality gate: score alone is never an entry permission. Require a clear
+ // directional edge, fresh/non-extended momentum, liquidity, and no nearby S/R wall.
+ const scoreGapOk=directionGap>=8;
+ const volumeOk=volRatio>=0.65;
+ const trendOk=bias==='LONG'?!maBear:!maBull;
+ const srObstacle=bias==='LONG'?(nearResistance&&c.close<=priorHigh):(nearSupport&&c.close>=priorLow);
+ const slPct=Math.max(0.01,Number(document.querySelector('#slPct')?.value)||0.2);
+ const rrInput=Math.max(0.5,Number(document.querySelector('#rr')?.value)||2);
+ const feePct=Math.max(0,Number(document.querySelector('#fee')?.value)||0);
+ const slipPct=Math.max(0,Number(document.querySelector('#slippage')?.value)||0);
+ const roundTripCostPct=2*(feePct+slipPct);
+ const netRewardPct=slPct*rrInput-roundTripCostPct;
+ const netRiskPct=slPct+roundTripCostPct;
+ const netRR=netRiskPct>0?netRewardPct/netRiskPct:0;
+ const costsOk=netRewardPct>0&&netRR>=1.10;
+ const eligible=score>=56&&scoreGapOk&&extension<0.70&&a.regime!=='EXTREME VOLATILITY'&&fresh&&directionalOk&&!oscConflict&&!rejectionAgainst&&volumeOk&&trendOk&&!srObstacle&&costsOk;
+ if(!scoreGapOk)reasons.push('arah belum unggul minimal 8 poin');
+ if(!volumeOk)reasons.push('volume belum cukup untuk konfirmasi');
+ if(!trendOk)reasons.push('arah berlawanan dengan tren MA50');
+ if(srObstacle)reasons.push('hambatan support/resistance terlalu dekat');
+ if(!costsOk)reasons.push(`target bersih tidak sebanding biaya (net R:R ${netRR.toFixed(2)}; perlu ≥1,10)`);
+ if(score<56)reasons.push('skor kandidat di bawah 56');
+ if(extension>=0.70)reasons.push('anti-chase: harga terlalu jauh dari EMA20');
+ return {score,bias,analysis:a,earlyScore:score,extension,fresh,eligible,directionGap,netRR,netRewardPct,netRiskPct,roundTripCostPct,signalAgeCandles:Number.isFinite(signalAgeCandles)?signalAgeCandles:null,oscDirection:osc.direction,oscAligned,oscConflict,maTrend:maBull?'BULLISH':maBear?'BEARISH':'NEUTRAL',nearFib,nearSupport,nearResistance,reason:eligible?'KANDIDAT TERFILTER · momentum + tren + biaya terkonfirmasi':reasons.slice(0,3).join(' · ')||'menunggu konfirmasi',closedTime:c.time,change:0,volume:0,upper,lower,volRatio};
 }
 async function scan(){
  if(hunterBusy)return; hunterBusy=true; $('#scanState').textContent='SCANNING BYBIT…';
