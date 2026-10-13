@@ -677,9 +677,15 @@ async function reconcileRealtime(){
   const d=marketProvider==='BYBIT'?await fetchBybitKlines(targetSymbol,2,chartInterval):await fetchMarketKlines(targetSymbol,2,chartInterval);
   if(seq!==marketSeq||gen!==symbolGeneration||targetSymbol!==symbol)return;
   const k=Array.isArray(d)&&d.length?d[d.length-1]:null; if(!k)throw new Error('Realtime kline kosong');
-  const changed=applyLiveKline({t:k.time,o:k.open,h:k.high,l:k.low,c:k.close,v:k.volume},targetSymbol,gen,'rest');
+  // fetchBybitKlines returns candle timestamps in SECONDS, while applyLiveKline
+  // accepts Bybit WebSocket timestamps in MILLISECONDS. Convert explicitly;
+  // otherwise REST recovery creates a 1970-era candle and the visible chart freezes.
+  const changed=applyLiveKline({t:Number(k.time)*1000,o:k.open,h:k.high,l:k.low,c:k.close,v:k.volume},targetSymbol,gen,'rest');
+  // Keep the entry-analysis candle stream aligned with REST recovery as well.
+  applyEntryKline({t:Number(k.time)*1000,o:k.open,h:k.high,l:k.low,c:k.close,v:k.volume},targetSymbol,gen);
   lastRestSyncAt=Date.now();
-  if(changed)setRealtimeStatus(`${marketProvider} · RECOVERY ${new Date(lastRestSyncAt).toLocaleTimeString('id-ID',{hour12:false})}`);
+  if(changed)setRealtimeStatus(`${marketProvider} · REST RECOVERY ${new Date(lastRestSyncAt).toLocaleTimeString('id-ID',{hour12:false})}`);
+  else if(Number(k.time)>=Number(candles.at(-1)?.time||0))$('#conn').textContent=`${marketProvider} REST RECOVERY · DATA CHECKED · CHART UNCHANGED`;
  }catch(e){
   // Aborts can be intentional when pair/timeframe changes or an in-flight request
   // is superseded. Do not report these as unexplained market failures.
