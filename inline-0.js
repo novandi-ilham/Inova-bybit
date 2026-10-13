@@ -429,7 +429,10 @@ function runAutoPaperTrade(){
  const btn=$('#tradeModeToggle'),help=$('#tradeModeHelp');
  if(btn){btn.textContent=autoTradeMode==='auto'?'AUTO TRADE: ON · PAPER':'AUTO TRADE: OFF · MANUAL';btn.classList.toggle('active',autoTradeMode==='auto');btn.classList.toggle('buy',autoTradeMode==='auto');}
  if(help)help.textContent=autoTradeMode==='auto'?'AUTO PAPER aktif: menilai candle live pada fase awal, membatalkan entry terlambat/berlawanan, hanya satu posisi, dan risk guard aktif.':'Manual entry aktif. Auto entry hanya tersedia pada PAPER; tidak mengirim order sungguhan.';
- if(autoTradeMode!=='auto'){const st=$('#engineStatus');if(st)st.textContent='ENTRY ALERT ONLY · aktifkan AUTO TRADE · PAPER';return;}\n if(mode!=='paper'){const st=$('#engineStatus');if(st)st.textContent='AUTO ENTRY TERSEDIA DI MODE PAPER';return;}\n if(killed){const st=$('#engineStatus');if(st)st.textContent='ENTRY LOCK ON · entry ditahan';return;}\n if(autoEntryBusy||hasValidPaperPosition())return;
+ if(autoTradeMode!=='auto'){const st=$('#engineStatus');if(st)st.textContent='ENTRY ALERT ONLY · aktifkan AUTO TRADE · PAPER';return;}
+ if(mode!=='paper'){const st=$('#engineStatus');if(st)st.textContent='AUTO ENTRY TERSEDIA DI MODE PAPER';return;}
+ if(killed){const st=$('#engineStatus');if(st)st.textContent='ENTRY LOCK ON · entry ditahan';return;}
+ if(autoEntryBusy||hasValidPaperPosition())return;
  const data=String($('#wickDataStatus')?.textContent||'');if(!data.startsWith('LIVE'))return;
  if(!(Number(livePrice)>0&&Date.now()-Number(lastWsTickerAt||0)<8000))return;
  const tf=normalizeTf(chartInterval),src=(Array.isArray(entryCandles)&&entryCandles.length>=36?entryCandles:candles).map(x=>({...x}));
