@@ -932,7 +932,10 @@ function scoreEarlyPair(cs,timeframe=chartInterval){
  const directionalCandle=bias==='LONG'?(c.close>c.open&&recent>0):(c.close<c.open&&recent<0);
  const pullbackTurn=bias==='LONG'?(lower>upper*1.15&&c.close>prev.close):(upper>lower*1.15&&c.close<prev.close);
  const recentSignal=(crossUp&&bias==='LONG')||(crossDown&&bias==='SHORT')||withinTwoCandles;
- const fresh=(recentSignal||((Math.abs(recent)<1.10)&&directionalLive)||pullbackTurn||directionalLive)&&extension<1.60&&earlyWindow&&moveNotLate;
+ const predictiveWick=(bias==='LONG'?prevBullReject&&c.close>=prev.close:prevBearReject&&c.close<=prev.close);
+ // Predictive entry: prior candle wick can signal rejection before a full trend confirmation.
+ // This is a probabilistic clue, not certainty; PAPER risk controls remain active.
+ const fresh=(recentSignal||((Math.abs(recent)<1.35)&&directionalLive)||pullbackTurn||directionalLive||predictiveWick)&&extension<1.85&&(earlyWindow||directionalLive||predictiveWick)&&moveNotLate;
  const rejectionAgainst=(bias==='LONG'&&upper>.42&&upper>lower*1.25)||(bias==='SHORT'&&lower>.42&&lower>upper*1.25);
  const reasons=[];
  if(extension>=0.95)reasons.push('anti-chase: harga sudah menjauh dari EMA20');
@@ -966,7 +969,10 @@ function scoreEarlyPair(cs,timeframe=chartInterval){
  const costsOk=netRewardPct>0&&netRR>=1.00;
  const wickTrendSetup=bias==='LONG'?wickTrendLong:wickTrendShort;
  const structureSetup=(bias==='LONG'?(brain.bosUp||brain.chochUp||brain.sweepLow||brain.nearSupport&&brain.bullishReject):(brain.bosDown||brain.chochDown||brain.sweepHigh||brain.nearResistance&&brain.bearishReject));
- const eligible=(wickTrendSetup||directionalCandle||pullbackTurn||structureSetup)&&extension<1.60&&fresh&&directionalOk&&(!rejectionAgainst||directionalLive)&&volumeOk&&trendOk&&!srObstacle&&costsOk;
+ const predictiveSetup=predictiveWick&&directionalLive&&extension<1.85;
+ // Looser entry gate: allow an early wick-rejection turn even before every trend/volume signal agrees.
+ // Still require live direction, bounded extension, positive net reward after estimated costs, and no strong S/R rejection.
+ const eligible=(wickTrendSetup||directionalCandle||pullbackTurn||structureSetup||predictiveSetup)&&extension<1.85&&fresh&&directionalOk&&(!rejectionAgainst||directionalLive)&&(volumeOk||predictiveSetup)&&(trendOk||predictiveSetup)&&!srObstacle&&costsOk;
  if(!scoreGapOk)reasons.push('arah belum unggul minimal 5 poin');
  if(!volumeOk)reasons.push('volume belum cukup untuk konfirmasi (min 0,55x)');
  if(!trendOk)reasons.push('arah berlawanan dengan tren MA50');
@@ -974,7 +980,7 @@ function scoreEarlyPair(cs,timeframe=chartInterval){
  if(!costsOk)reasons.push(`target bersih tidak sebanding biaya (net R:R ${netRR.toFixed(2)}; perlu ≥1,00)`);
  // Score thresholds intentionally removed: entry decision follows previous-candle wick + trend.
  if(extension>=0.95)reasons.push('anti-chase: harga terlalu jauh dari EMA20');
- return {score,bias,analysis:a,brain,structure:brain.structure,marketEvent:brain.event,brainDirection:brain.direction,brainScore:brain.score,earlyScore:score,extension,fresh,eligible,directionGap,wickTrendStrength,priorUpper:prevUpper,priorLower:prevLower,priorWick:prevBullReject?'SUSUT BAWAH / POTENSI PANTUL':prevBearReject?'SUSUT ATAS / POTENSI TURUN':'SUMBU CAMPURAN',trendDirection:trendUp?'UPTREND':trendDown?'DOWNTREND':'SIDEWAYS',netRR,netRewardPct,netRiskPct,roundTripCostPct,signalAgeCandles:Number.isFinite(signalAgeCandles)?signalAgeCandles:null,oscDirection:osc.direction,oscAligned,oscConflict,maTrend:maBull?'BULLISH':maBear?'BEARISH':'NEUTRAL',nearFib,nearSupport,nearResistance,reason:eligible?`WICK + TREND OK · ${prevBullReject?'sumbu bawah candle sebelumnya':prevBearReject?'sumbu atas candle sebelumnya':'candle lanjutan'} · ${trendUp?'UPTREND':trendDown?'DOWNTREND':'SIDEWAYS'}`:reasons.slice(0,3).join(' · ')||'menunggu wick dan tren',closedTime:c.time,change:0,volume:0,upper,lower,volRatio};
+ return {score,bias,analysis:a,brain,structure:brain.structure,marketEvent:brain.event,brainDirection:brain.direction,brainScore:brain.score,earlyScore:score,extension,fresh,eligible,directionGap,wickTrendStrength,priorUpper:prevUpper,priorLower:prevLower,priorWick:prevBullReject?'SUSUT BAWAH / POTENSI PANTUL':prevBearReject?'SUSUT ATAS / POTENSI TURUN':'SUMBU CAMPURAN',trendDirection:trendUp?'UPTREND':trendDown?'DOWNTREND':'SIDEWAYS',netRR,netRewardPct,netRiskPct,roundTripCostPct,signalAgeCandles:Number.isFinite(signalAgeCandles)?signalAgeCandles:null,oscDirection:osc.direction,oscAligned,oscConflict,maTrend:maBull?'BULLISH':maBear?'BEARISH':'NEUTRAL',nearFib,nearSupport,nearResistance,reason:eligible?(predictiveSetup?'PREDICTIVE WICK · sumbu candle sebelumnya + arah live':`WICK + TREND OK · ${prevBullReject?'sumbu bawah candle sebelumnya':prevBearReject?'sumbu atas candle sebelumnya':'candle lanjutan'} · ${trendUp?'UPTREND':trendDown?'DOWNTREND':'SIDEWAYS'}`):reasons.slice(0,3).join(' · ')||'menunggu wick dan tren',closedTime:c.time,change:0,volume:0,upper,lower,volRatio};
 }
 async function scan(){
  if(hunterBusy)return; hunterBusy=true; $('#scanState').textContent='SCANNING BYBIT…';
@@ -997,7 +1003,7 @@ async function scan(){
  // candidate reflect current momentum rather than a stale cached kline or 24h leaderboard.
  const tickerPrice=Number(x.lastPrice);if(cs.length&&tickerPrice>0){const live=cs[cs.length-1];live.close=tickerPrice;live.high=Math.max(live.high,tickerPrice);live.low=Math.min(live.low,tickerPrice);}
  const scored=scoreEarlyPair(cs);if(scored)results[i]={symbol:x.symbol,...scored,change:Number(x.price24hPcnt)*100,volume:Number(x.turnover24h)};}catch{results[i]=null;}}};await Promise.all(Array.from({length:Math.min(9,universe.length)},worker));
-   const ranked=results.filter(x=>x&&(x.eligible||x.fresh||x.score>=25)&&x.extension<2.25&&!isPairLossBlocked(x.symbol)&&!(x.symbol===rotateAwaySymbol&&Date.now()<rotateAwayUntil)&&Number(manualPairSkipUntil[x.symbol]||0)<=Date.now()).map(x=>({...x,rankScore:x.score+(x.fresh?8:0)+(x.oscAligned?5:0)+(x.brainDirection===x.bias?5:0)+(String(x.marketEvent||'').startsWith('BOS')||String(x.marketEvent||'').startsWith('CHoCH')?4:0)-(x.oscConflict?12:0)-(x.extension>0.8?Math.min(16,(x.extension-0.8)*18):0)-(Math.abs(Number(x.change)||0)>12?Math.min(12,(Math.abs(Number(x.change)||0)-12)*0.5):0)+Math.min(4,Math.log10(Math.max(1,x.volume||1))-5)})).sort((a,b)=>(Number(b.eligible)-Number(a.eligible))||b.rankScore-a.rankScore),best=ranked.find(x=>x.eligible)||ranked[0],currentCandidate=ranked.find(x=>x.symbol===symbol),switchEdge=best?best.rankScore-(currentCandidate?.rankScore||0):0;
+   const ranked=results.filter(x=>x&&(x.eligible||x.fresh||x.score>=25)&&x.extension<2.40&&!isPairLossBlocked(x.symbol)&&!(x.symbol===rotateAwaySymbol&&Date.now()<rotateAwayUntil)&&Number(manualPairSkipUntil[x.symbol]||0)<=Date.now()).map(x=>({...x,rankScore:x.score+(x.fresh?8:0)+(x.oscAligned?5:0)+(x.brainDirection===x.bias?5:0)+(String(x.marketEvent||'').startsWith('BOS')||String(x.marketEvent||'').startsWith('CHoCH')?4:0)-(x.oscConflict?12:0)-(x.extension>0.8?Math.min(16,(x.extension-0.8)*18):0)-(Math.abs(Number(x.change)||0)>12?Math.min(12,(Math.abs(Number(x.change)||0)-12)*0.5):0)+Math.min(4,Math.log10(Math.max(1,x.volume||1))-5)})).sort((a,b)=>(Number(b.eligible)-Number(a.eligible))||b.rankScore-a.rankScore),best=ranked.find(x=>x.eligible)||ranked[0],currentCandidate=ranked.find(x=>x.symbol===symbol),switchEdge=best?best.rankScore-(currentCandidate?.rankScore||0):0;
   const top=ranked.slice(0,8);$('#scanCandidates').innerHTML=top.length?top.map((x,i)=>`<div class="scan-candidate" data-candidate="${x.symbol}"><div><b>${i+1}. ${x.symbol} · ${x.bias==='LONG'?'BUY/LONG':'SELL/SHORT'}</b><div class="rank">${x.eligible?'SETUP AWAL LAYAK':'BELUM SIAP'} · ${(TF_LABEL&&TF_LABEL[normalizeTf(chartInterval)])||normalizeTf(chartInterval)}</div></div><b class="score" style="color:${x.eligible?'#19d59a':'#f4c15d'}">${x.score}/100</b><div class="meta">${x.reason||'menunggu konfirmasi'} · STRUKTUR ${x.structure||'BUILDING'} · ${x.marketEvent||'NO BREAK'} · BB/OSC ${x.oscDirection||'—'} · EMA20 ${x.extension.toFixed(2)} ATR · volume x${Number(x.volRatio||0).toFixed(2)}</div></div>`).join(''):'<div class="muted small">Data scanner belum tersedia. Coba Refresh.</div>';$$('[data-candidate]').forEach(e=>e.onclick=()=>switchSymbol(e.dataset.candidate));
    const active=mode==='paper'?hasValidPaperPosition():(mode==='demo'?hasValidDemoPosition():false);
    const activeSymbol=mode==='paper'?paperPos?.symbol:(mode==='demo'?currentDemoPosition()?.symbol:null);
@@ -1032,7 +1038,7 @@ async function scan(){
         $('#scanState').textContent=`POSISI AKTIF · ${activeSymbol} · ${currentScore.toFixed(0)} · ${fmtIDR(holdPnl)} · reversal belum valid`;
       }
     }else $('#scanState').textContent=`POSISI AKTIF · ${activeSymbol} · ${currentScore.toFixed(0)} · ${fmtIDR(holdPnl)}`;
-   }else if(best&&Date.now()-lastSwitchAt>=HUNTER.cooldownMs&&(!best.eligible||!best.fresh||best.extension>1.5)){
+   }else if(best&&Date.now()-lastSwitchAt>=HUNTER.cooldownMs&&(!best.eligible||!best.fresh||best.extension>1.85)){
     // Keep hunting instead of freezing on the current pair: rotate to the best exploratory
     // candidate even when it is not entry-ready. Entry still requires a separate live recheck.
     const currentReady=!!(currentCandidate&&currentCandidate.eligible&&currentCandidate.fresh&&currentCandidate.extension<=1.5);
@@ -1040,7 +1046,7 @@ async function scan(){
       const old=symbol;log(`PAIR HUNT ROTATION · ${old} → ${best.symbol} · exploratory score ${Math.round(best.score)} · entry belum diizinkan`);
       await switchSymbol(best.symbol);lastSwitchAt=Date.now();$('#scanState').textContent=`HUNTING PAIR · ${best.symbol} · score ${Math.round(best.score)} · menunggu setup`;
     }else $('#scanState').textContent=`HUNTING PAIR · ${ranked.length} kandidat · terbaik ${best.symbol} ${Math.round(best.score)} · belum entry`;
-   }else if(best&&best.eligible&&best.fresh&&best.extension<=1.5&&Date.now()-lastSwitchAt>=HUNTER.cooldownMs){
+   }else if(best&&best.eligible&&best.fresh&&best.extension<=1.85&&Date.now()-lastSwitchAt>=HUNTER.cooldownMs){
     const target=best.symbol, targetBias=best.bias, targetScore=best.score;
     if(target!==symbol) await switchSymbol(target);
     const fresh=analyze();
