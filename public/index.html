@@ -140,7 +140,7 @@ const scannerKlineCache=new Map();
 let autoTimeframe=true,lastMultiTfScanAt=0,lastTfSwitchAt=0,multiTfBusy=false;
 async function getScannerKlines(sym,interval=chartInterval){const tf=normalizeTf(interval),cacheKey=tf+':'+sym;const hit=scannerKlineCache.get(cacheKey);if(hit&&Date.now()-hit.at<2800)return hit.data;const d=await bybitPublic('/v5/market/kline',{category:'linear',symbol:sym,interval:tfApi(tf),limit:'80'});const data=d?.result?.list||[];if(!data.length)throw new Error('Bybit kline kosong');scannerKlineCache.set(cacheKey,{at:Date.now(),data});return data;}
 async function scanCrossTimeframes(universe,activePosition){
- if(!autoTimeframe||!auto||killed||activePosition||multiTfBusy||Date.now()-lastMultiTfScanAt<3500||Date.now()-lastTfSwitchAt<4500)return false;
+ if(!autoTimeframe||!auto||activePosition||multiTfBusy||Date.now()-lastMultiTfScanAt<3500||Date.now()-lastTfSwitchAt<4500)return false;
  multiTfBusy=true;lastMultiTfScanAt=Date.now();
  try{
   const tfList=[...new Set(['3m','5m','15m','30m','1h',normalizeTf(chartInterval)])];
@@ -1012,7 +1012,7 @@ async function scan(){
   $('#leaders').innerHTML='<div class="muted">Top Gainers</div>'+gainers.map(x=>`<div class="kv"><span>${x.symbol}</span><b class="up">+${(Number(x.price24hPcnt)*100).toFixed(2)}%</b></div>`).join('')+'<div class="muted" style="margin-top:8px">Top Losers</div>'+losers.map(x=>`<div class="kv"><span>${x.symbol}</span><b class="down">${(Number(x.price24hPcnt)*100).toFixed(2)}%</b></div>`).join('');
 
   // Scanner ranks early momentum candidates; PAPER auto engine may enter or reverse only after live revalidation.
-  if(auto&&!killed&&mode==='paper'&&!hasValidPaperPosition()&&Date.now()-lastSwitchAt>=HUNTER.cooldownMs){
+  if(auto&&mode==='paper'&&!hasValidPaperPosition()&&Date.now()-lastSwitchAt>=HUNTER.cooldownMs){
    // Bounded concurrency protects Bybit rate limits while scanning the highest-liquidity and momentum pairs quickly.
    const results=Array(universe.length);let scanIndex=0;const worker=async()=>{while(scanIndex<universe.length){const i=scanIndex++,x=universe[i];try{const kd=(await getScannerKlines(x.symbol)).slice().reverse();const cs=kd.map(k=>({time:Math.floor(Number(k[0])/1000),open:+k[1],high:+k[2],low:+k[3],close:+k[4],volume:+k[5]}));
  // Refresh the current forming candle from the live ticker before scoring. This makes the
@@ -1028,6 +1028,19 @@ async function scan(){
 
    // Scan across timeframes and automatically move the chart only when there is no open position.
    if(!active&&await scanCrossTimeframes(universe,active))return;
+
+   // V43: a manual/risk entry lock must block orders, not kill market scanning or pair rotation.
+   // When locked, continue showing the best candidate and switch the chart for observation only.
+   if(!active&&killed){
+    if(best&&best.symbol!==symbol&&Date.now()-lastSwitchAt>=HUNTER.cooldownMs){
+      const from=symbol; await switchSymbol(best.symbol); lastSwitchAt=Date.now();
+      $('#scanState').textContent=`ENTRY LOCK ON · SCAN SAJA · ${best.symbol} ${best.bias} ${best.score}/100`;
+      log(`SCAN-ONLY PAIR ROTATION · ${from} → ${best.symbol} · ${best.bias} ${best.score}/100 · ENTRY LOCK ON, order tidak dikirim`);
+    }else if(best){$('#scanState').textContent=`ENTRY LOCK ON · SCAN SAJA · BEST ${best.symbol} ${best.bias} ${best.score}/100`;}
+    else {$('#scanState').textContent='ENTRY LOCK ON · SCAN AKTIF · BELUM ADA KANDIDAT';}
+    autoDiagnostic('ENTRY LOCK ON','pemindaian/pindah pair tetap aktif; order ditahan sampai lock dibuka');
+    return;
+   }
 
    // FLEXIBLE AUTO ENTRY: use the scanner's best early-momentum candidate; keep hard risk/SL safeguards.
    if(active){
@@ -1074,7 +1087,7 @@ async function scan(){
     }else if(best){$('#scanState').textContent=`WAIT CANDLE · ${target} · ${targetBias} · ${targetScore}`;}
    }else if(best){
     const ready=ranked.filter(x=>x.eligible||x.fresh||x.score>=35).length;$('#scanState').textContent=ready?`${ready} SETUP · BEST ${best.symbol} ${best.score}`:`CANDIDATE ${best.symbol} ${best.score} · MENUNGGU ARAH CANDLE`;
-   }else {$('#scanState').textContent='DATA SCAN BELUM TERSEDIA';$('#scanCandidates').innerHTML='<div class="muted small">Data kline tidak tersedia. Periksa koneksi Bybit/API.</div>';}
+   }else {$('#scanState').textContent=killed?'ENTRY LOCK ON · SCAN AKTIF · DATA KANDIDAT BELUM TERSEDIA':'DATA SCAN BELUM TERSEDIA';$('#scanCandidates').innerHTML='<div class="muted small">Data kline tidak tersedia. Periksa koneksi Bybit/API.</div>';}
   }else{$('#scanState').textContent='BYBIT SCANNER READY · MANUAL TRADING'}
  }catch(e){log('Bybit scanner error: '+e.message);$('#scanState').textContent='BYBIT SCANNER ERROR'}finally{hunterBusy=false}
 }

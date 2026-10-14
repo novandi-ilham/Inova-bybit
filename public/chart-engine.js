@@ -110,8 +110,37 @@ class CanvasChart {
       }
       for(const [v,label,col] of [[this.srLevels.resistance,'R','#ffb65c'],[this.srLevels.support,'S','#4de1ff']])if(Number.isFinite(Number(v))&&Number(v)>0){const y=this.py(Number(v),r);this.line(48,y,W-40,y,col+'55',1,[5,5]);}
     }
-    // H/L marks: visible-range extreme plus latest confirmed local swing points.
+    // Confirmed BUY POINT / SELL POINT markers. These are historical rule-based
+    // confluence markers, not guarantees: pivot is confirmed only after the next
+    // candle closes, with reversal candle + EMA/trend context.
     const visible=r.cs;
+    const pointStart=Math.max(1,r.start), pointEnd=Math.min(this.candles.length-1,r.end-1);
+    const pointCandidates=[];
+    for(let i=pointStart+1;i<pointEnd;i++){
+      const p=this.candles[i-1], q=this.candles[i], prev=this.candles[i-2];
+      if(!p||!q||!prev)continue;
+      const emaIndex=i-(this.candles.length-this.ema.length);
+      const emaNow=emaIndex>=0?Number(this.ema[emaIndex]):NaN;
+      const emaPrev=emaIndex>0?Number(this.ema[emaIndex-1]):NaN;
+      const pivotLow=Number(p.low)<=Number(prev.low)&&Number(p.low)<=Number(q.low);
+      const pivotHigh=Number(p.high)>=Number(prev.high)&&Number(p.high)>=Number(q.high);
+      const bull=Number(q.close)>Number(q.open)&&Number(q.close)>=((Number(p.low)+Number(p.high))/2);
+      const bear=Number(q.close)<Number(q.open)&&Number(q.close)<=((Number(p.low)+Number(p.high))/2);
+      const emaBull=!Number.isFinite(emaNow)||(Number(q.close)>=emaNow&&(!Number.isFinite(emaPrev)||emaNow>=emaPrev));
+      const emaBear=!Number.isFinite(emaNow)||(Number(q.close)<=emaNow&&(!Number.isFinite(emaPrev)||emaNow<=emaPrev));
+      if(pivotLow&&bull&&emaBull)pointCandidates.push({index:i-1,side:'BUY',price:Number(p.low)});
+      if(pivotHigh&&bear&&emaBear)pointCandidates.push({index:i-1,side:'SELL',price:Number(p.high)});
+    }
+    // Keep the chart readable on mobile; show the latest confirmed points only.
+    for(const pt of pointCandidates.slice(-8)){
+      if(pt.index<r.start||pt.index>=r.end)continue;
+      const x=this.px(pt.index,r), isBuy=pt.side==='BUY', col=isBuy?'#19d59a':'#ff5c72';
+      const y=this.py(pt.price,r)+(isBuy?17:-17), label=isBuy?'BUY-POINT':'SELL-POINT';
+      const bw=label.length*5.7+12,bh=17, bx=Math.max(48,Math.min(W-40-bw,x-bw/2)), by=Math.max(24,Math.min(H-35-bh,y-(isBuy?0:bh)));
+      c.fillStyle=col;c.beginPath();c.roundRect(bx,by,bw,bh,4);c.fill();
+      this.text(label,bx+bw/2,by+11.5,'#061018',9,'center');
+      this.line(x,this.py(pt.price,r),x,by+(isBuy?0:bh),col,1,[]);
+    }
     if(visible.length){
       let hiIdx=0,loIdx=0;
       for(let i=1;i<visible.length;i++){if(+visible[i].high>+visible[hiIdx].high)hiIdx=i;if(+visible[i].low<+visible[loIdx].low)loIdx=i;}
@@ -137,7 +166,7 @@ class CanvasChart {
     if(this.brain){const b=this.brain,dir=b.direction||'NEUTRAL',col=dir==='LONG'?'#19d59a':dir==='SHORT'?'#ff5c72':'#f4c44f';const label=`BRAIN ${dir} · ${b.structure||'BUILDING'} · ${b.event||'NO BREAK'}`;c.fillStyle='rgba(5,10,16,.88)';c.fillRect(54,24,Math.min(W-110,Math.max(180,label.length*6.1)),18);this.text(label,60,37,col,10,'left');
       const last=this.candles.at(-1);if(last&&b.event&&b.event!=='NONE'){const bullish=/↑|LOW/.test(b.event),col2=bullish?'#19d59a':'#ff5c72',yy=this.py(bullish?last.low:last.high,r)+(bullish?18:-18);this.text(b.event,this.px(this.candles.length-1,r),Math.max(52,Math.min(H-30,yy)),col2,10,'center');}
     }
-    if(this.setup&&['BUY','SELL'].includes(this.setup.side)){
+    if(this.setup&&['BUY','SELL'].includes(this.setup.side)&&Number(this.setup.score)>=35){
       const z=this.setup,valid=z.valid!==false,col=z.side==='BUY'?'#19d59a':'#ff5c72';
       const levels=[[Number(z.entry),col,`${z.side} ENTRY`],[Number(z.sl),'#ff5c72','SL'],[Number(z.tp),'#4de1ff','TARGET']];
       for(const [v,color,label] of levels){if(!Number.isFinite(v)||v<=0)continue;const y=this.py(v,r);if(y<8||y>H-26)continue;this.line(48,y,W-40,color,1,label==='SL'?[3,4]:[7,4]);this.text(`${label} ${this.fmt(v)}`,W-45,Math.max(18,y-4),color,9,'right');}
