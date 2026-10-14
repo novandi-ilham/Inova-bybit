@@ -1,3 +1,12 @@
+## V42 Risk/PnL/Auto Trade Hardening
+
+- PAPER history validation and quarantine for implausible PnL records.
+- Asia/Jakarta daily-loss accounting and persistent entry lock.
+- Auto entry waits when Final Signal and forecast disagree.
+- See `README-V42-RISK-PNL-AUTOTRADE-HARDENING.md`.
+
+---
+
 # Ilham Novandi — Bybit Linear Futures 15M
 
 This build is Bybit-only end-to-end: Bybit Linear USDT market data, 15M candle history, public WebSocket realtime updates, scanner, paper analysis, and server-side account/order endpoints.
