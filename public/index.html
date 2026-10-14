@@ -8,7 +8,7 @@
 
 .scan-candidates{display:grid;gap:6px}.scan-candidate{display:grid;grid-template-columns:1fr auto;gap:4px;padding:8px;border:1px solid #253448;border-radius:8px;background:#0b1420;cursor:pointer}.scan-candidate:active{opacity:.8}.scan-candidate b{font-size:11px}.scan-candidate .meta{font-size:10px;color:#9aabba;grid-column:1/-1;line-height:1.35}.scan-candidate .score{font-size:12px}.scan-candidate .rank{font-size:9px;color:#8fa4ba}
 
-/* V45 SIMPLIFIED SIGNAL UI: keep only EMA20 + price action + support/resistance. */
+/* V46 SIMPLIFIED SIGNAL UI: keep only EMA20 + price action + support/resistance. */
 .bt-indpanel{display:none!important}
 #wickForecastPanel,#marketIntelligencePanel{display:none!important}
 .bt-indicators .bt-note{max-width:190px}
@@ -198,7 +198,7 @@ function dailyLossLimitIDR(){const pct=Math.max(0,Number($('#dailyLoss')?.value)
 function tradeRecordIsSane(t){if(!t||typeof t!=='object')return false;const entry=Number(t.entry),exit=Number(t.exit),qty=Number(t.qty),pnl=Number(t.pnl),time=Number(t.time),margin=Number(t.margin||0);if(!/^[A-Z0-9]{3,24}$/.test(String(t.symbol||''))||!['BUY','SELL'].includes(String(t.side||'').toUpperCase()))return false;if(![entry,exit,qty,pnl,time].every(Number.isFinite)||entry<=0||exit<=0||qty<=0||time<=0||time>Date.now()+86400000)return false;const equity=Math.max(1000000,Number(accountEquity)||10000000);const maxLoss=Math.max(equity*0.05,Number.isFinite(margin)&&margin>0?margin*1.5:0);if(Math.abs(pnl)>maxLoss)return false;const expectedRaw=((exit-entry)*qty*(String(t.side).toUpperCase()==='BUY'?1:-1))*IDR;const feeRate=Math.max(0,Number($('#fee')?.value)||0)/100,slipRate=Math.max(0,Number($('#slippage')?.value)||0)/100;const expectedNet=(expectedRaw-(entry+exit)*qty*(feeRate+slipRate)*IDR);if(Number.isFinite(expectedNet)&&Math.abs(pnl-expectedNet)>Math.max(100,Math.abs(expectedNet)*0.25))return false;return true}
 function enforceRiskLock(){const limit=dailyLossLimitIDR();const balance=Number(accountEquity)+Number(paperPnl);if((limit>0&&dailyPnl<=-limit)||balance<=0){if(!killed)log(`RISK GUARD LOCK · daily PnL ${fmtIDR(dailyPnl)} · batas ${fmtIDR(-limit)} · entry otomatis dihentikan`);killed=true;const b=$('#killBtn');if(b){b.textContent='ENTRY LOCK: ON';b.classList.add('active')}const st=$('#engineStatus');if(st){st.className='dangerbox';st.textContent='RISK GUARD · ENTRY DIKUNCI'}persist();return true}return false}
 function persist(){try{localStorage.setItem('ilhamPaperState',JSON.stringify({date:localDayKey(),symbol,paperPos,paperPnl,dailyPnl,lossStreak,pairLossStreak,pairCooldownUntil,tradeStats,tradeHistory,tradeMarkers,killed,margin:+$('#margin').value||DEFAULT_PAPER_MARGIN_IDR,leverage:+$('#lev').value||DEFAULT_LEVERAGE,maxFloatLoss:HARD_RISK_PCT,pairScanner:auto}))}catch{}}
-function restore(){try{const x=JSON.parse(localStorage.getItem('ilhamPaperState')||'null');if(!x)return;symbol=x.symbol||symbol;const incoming=Array.isArray(x.tradeHistory)?x.tradeHistory:[];corruptTradeHistory=incoming.filter(t=>!tradeRecordIsSane(t));tradeHistory=incoming.filter(tradeRecordIsSane);if(corruptTradeHistory.length){try{localStorage.setItem('ilhamPaperQuarantine',JSON.stringify({time:Date.now(),reason:'PnL/entry/exit tidak lolos validasi risiko',trades:corruptTradeHistory}))}catch{}log(`DATA PNL TIDAK VALID · ${corruptTradeHistory.length} transaksi dipisahkan dari saldo/performa; cek riwayat sebelum menggunakannya.`)}paperPnl=tradeHistory.reduce((a,t)=>a+Number(t.pnl||0),0);tradeStats={wins:tradeHistory.filter(t=>Number(t.pnl||0)>0).length,losses:tradeHistory.filter(t=>Number(t.pnl||0)<0).length};dailyPnl=tradeHistory.filter(t=>localDayKey(Number(t.time))===localDayKey()).reduce((a,t)=>a+Number(t.pnl||0),0);lossStreak=0;for(let i=tradeHistory.length-1;i>=0;i--){if(Number(tradeHistory[i].pnl||0)<0)lossStreak++;else break}pairLossStreak={};for(const t of tradeHistory){if(Number(t.pnl||0)<0)pairLossStreak[t.symbol]=(pairLossStreak[t.symbol]||0)+1;else pairLossStreak[t.symbol]=0}tradeMarkers=Array.isArray(x.tradeMarkers)?x.tradeMarkers.filter(m=>m&&m.symbol):[];if($('#margin'))$('#margin').value=Number(x.margin)||DEFAULT_PAPER_MARGIN_IDR;if($('#lev'))$('#lev').value=Number(x.leverage)||DEFAULT_LEVERAGE;pairCooldownUntil={};for(const t of tradeHistory){if(Number(t.pnl||0)<0){const until=Number(t.time||0)+PAIR_LOSS_COOLDOWN_MS;if(until>Date.now())pairCooldownUntil[t.symbol]=until}}if($('#maxFloatLoss'))$('#maxFloatLoss').value=HARD_RISK_PCT;auto=x.pairScanner!==false;paperPos=x.paperPos||null;if(!hasValidPaperPosition())paperPos=null;killed=(x.killed!==false)||corruptTradeHistory.length>0;updatePaperAccount(0);renderPaperOrderPreview();$('#dailyLossOut').textContent=fmtIDR(dailyPnl);$('#lossStreak').textContent=lossStreak;updatePairLossUI(symbol);if(enforceRiskLock()){}else{const b=$('#killBtn');if(b){b.textContent='ENTRY LOCK: '+(killed?'ON':'OFF');b.classList.toggle('active',killed)}}if(corruptTradeHistory.length){const notice=$('#dataIntegrityNotice');if(notice){notice.style.display='block';notice.textContent=`DATA HISTORY PERLU DIVERIFIKASI · ${corruptTradeHistory.length} transaksi lama tidak masuk saldo karena PnL/ukuran tidak wajar; entry dikunci.`}const diag=$('#autoDiagPanel');if(diag)diag.textContent=`AUTO DIAGNOSTIC · ${corruptTradeHistory.length} transaksi lama dikarantina karena nilai PnL/ukuran tidak wajar; ENTRY LOCK ON sampai diperiksa.`}log(`Paper state direkonsiliasi · ${tradeHistory.length} transaksi valid · ${corruptTradeHistory.length} dikarantina · ENTRY LOCK ${killed?'ON':'OFF'}`);persist()}catch(e){killed=true;log('Paper restore error · ENTRY LOCK ON: '+e.message)}}
+function restore(){try{const x=JSON.parse(localStorage.getItem('ilhamPaperState')||'null');if(!x)return;symbol=x.symbol||symbol;const incoming=Array.isArray(x.tradeHistory)?x.tradeHistory:[];corruptTradeHistory=incoming.filter(t=>!tradeRecordIsSane(t));tradeHistory=incoming.filter(tradeRecordIsSane);if(corruptTradeHistory.length){try{localStorage.setItem('ilhamPaperQuarantine',JSON.stringify({time:Date.now(),reason:'PnL/entry/exit tidak lolos validasi risiko',trades:corruptTradeHistory}))}catch{}log(`DATA PNL TIDAK VALID · ${corruptTradeHistory.length} transaksi dipisahkan dari saldo/performa; cek riwayat sebelum menggunakannya.`)}paperPnl=tradeHistory.reduce((a,t)=>a+Number(t.pnl||0),0);tradeStats={wins:tradeHistory.filter(t=>Number(t.pnl||0)>0).length,losses:tradeHistory.filter(t=>Number(t.pnl||0)<0).length};dailyPnl=tradeHistory.filter(t=>localDayKey(Number(t.time))===localDayKey()).reduce((a,t)=>a+Number(t.pnl||0),0);lossStreak=0;for(let i=tradeHistory.length-1;i>=0;i--){if(Number(tradeHistory[i].pnl||0)<0)lossStreak++;else break}pairLossStreak={};for(const t of tradeHistory){if(Number(t.pnl||0)<0)pairLossStreak[t.symbol]=(pairLossStreak[t.symbol]||0)+1;else pairLossStreak[t.symbol]=0}tradeMarkers=Array.isArray(x.tradeMarkers)?x.tradeMarkers.filter(m=>m&&m.symbol):[];if($('#margin'))$('#margin').value=Number(x.margin)||DEFAULT_PAPER_MARGIN_IDR;if($('#lev'))$('#lev').value=Number(x.leverage)||DEFAULT_LEVERAGE;pairCooldownUntil={};for(const t of tradeHistory){if(Number(t.pnl||0)<0){const until=Number(t.time||0)+PAIR_LOSS_COOLDOWN_MS;if(until>Date.now())pairCooldownUntil[t.symbol]=until}}auto=true; if($('#autoToggle')){$('#autoToggle').textContent='AUTO SCAN: ON';$('#autoToggle').classList.add('active')} if($('#maxFloatLoss'))$('#maxFloatLoss').value=HARD_RISK_PCT;auto=true; if($('#autoToggle')){$('#autoToggle').textContent='AUTO SCAN: ON';$('#autoToggle').classList.add('active')} paperPos=x.paperPos||null;if(!hasValidPaperPosition())paperPos=null;killed=(x.killed!==false)||corruptTradeHistory.length>0;updatePaperAccount(0);renderPaperOrderPreview();$('#dailyLossOut').textContent=fmtIDR(dailyPnl);$('#lossStreak').textContent=lossStreak;updatePairLossUI(symbol);if(enforceRiskLock()){}else{const b=$('#killBtn');if(b){b.textContent='ENTRY LOCK: '+(killed?'ON':'OFF');b.classList.toggle('active',killed)}}if(corruptTradeHistory.length){const notice=$('#dataIntegrityNotice');if(notice){notice.style.display='block';notice.textContent=`DATA HISTORY PERLU DIVERIFIKASI · ${corruptTradeHistory.length} transaksi lama tidak masuk saldo karena PnL/ukuran tidak wajar; entry dikunci.`}const diag=$('#autoDiagPanel');if(diag)diag.textContent=`AUTO DIAGNOSTIC · ${corruptTradeHistory.length} transaksi lama dikarantina karena nilai PnL/ukuran tidak wajar; ENTRY LOCK ON sampai diperiksa.`}log(`Paper state direkonsiliasi · ${tradeHistory.length} transaksi valid · ${corruptTradeHistory.length} dikarantina · ENTRY LOCK ${killed?'ON':'OFF'}`);persist()}catch(e){killed=true;log('Paper restore error · ENTRY LOCK ON: '+e.message)}}
 function log(s){const e=document.createElement('div');e.className='log';e.textContent=new Date().toLocaleTimeString('id-ID')+' · '+s;$('#logs').prepend(e)}
 function ema(vals,p=20){let k=2/(p+1),e=vals[0],out=[];vals.forEach((v,i)=>{e=i? v*k+e*(1-k):v;out.push(e)});return out}
 function atr(cs=candles){if(cs.length<20)return 0;let a=[];for(let i=1;i<cs.length;i++)a.push(Math.max(cs[i].high-cs[i].low,Math.abs(cs[i].high-cs[i-1].close),Math.abs(cs[i].low-cs[i-1].close)));return a.slice(-14).reduce((x,y)=>x+y,0)/Math.min(14,a.length)}
@@ -555,7 +555,7 @@ function renderFinalSignal(){
  // Early heads-up: evaluate the forming candle with current ticker, but never treat it as a confirmed entry.
  const earlyCandles=activeCandles.map(x=>({...x}));
  if(earlyCandles.length&&Number.isFinite(Number(livePrice))&&Number(livePrice)>0){const ec=earlyCandles[earlyCandles.length-1];ec.close=Number(livePrice);ec.high=Math.max(Number(ec.high)||Number(livePrice),Number(livePrice));ec.low=Math.min(Number(ec.low)||Number(livePrice),Number(livePrice));}
- const earlySetup=earlyCandles.length>=36?scoreEarlyPair([...earlyCandles,earlyCandles[earlyCandles.length-1]]):null;
+ const earlySetup=earlyCandles.length>=36?scoreEarlyPair(earlyCandles):null;
  const a=closedActive.length>=30?analyzeData(closedActive):null,f=forecastFromLastWick();
  const dataText=($('#wickDataStatus')?.textContent||'BELUM DIKETAHUI').trim();
  const isLive=dataText.startsWith('LIVE'),isRecovery=dataText.startsWith('REST RECOVERY');
@@ -565,7 +565,7 @@ function renderFinalSignal(){
  const bbEl=$('#bbReaction'),oscEl=$('#bbOscScore'),oscDetailEl=$('#bbOscDetail');if(bbEl)bbEl.textContent='Menghitung EMA20…';if(oscEl)oscEl.textContent='Menunggu price action…';if(oscDetailEl)oscDetailEl.textContent='Hanya EMA20 + price action menentukan arah utama.';
  // Score the forming candle for early momentum; use the same scorer as the scanner to keep direction consistent.
  const scoredSetup=activeCandles.length>=35?scoreEarlyPair(earlyCandles):null;
- // V45: primary decision uses only EMA20 trend + completed-candle price action.
+ // V46: primary decision uses only EMA20 trend + completed-candle price action.
  const lessonPA=lessonPriceAction(closedActive,livePrice);
  const closedCloses=closedActive.map(x=>Number(x.close)).filter(Number.isFinite);
  const emaSeries=closedCloses.length>=20?ema(closedCloses,20):[];
@@ -632,10 +632,19 @@ function autoDiagnostic(reason,detail='',blocked=true){
 function runAutoPaperTrade(){
  const btn=$('#tradeModeToggle'),help=$('#tradeModeHelp');
  if(btn){btn.textContent=autoTradeMode==='auto'?'AUTO TRADE: ON · PAPER':'AUTO TRADE: OFF · MANUAL';btn.classList.toggle('active',autoTradeMode==='auto');btn.classList.toggle('buy',autoTradeMode==='auto');}
- if(help)help.textContent=autoTradeMode==='auto'?'AUTO PAPER aktif: menilai candle live pada fase awal, membatalkan entry terlambat/berlawanan, hanya satu posisi, dan risk guard aktif.':'Manual entry aktif. Auto entry hanya tersedia pada PAPER; tidak mengirim order sungguhan.';
+ if(help)help.textContent=autoTradeMode==='auto'?'AUTO PAPER aktif: keputusan utama EMA20 + price action; support/resistance hanya konteks. Satu posisi, data segar, dan Risk Guard tetap wajib.':'Manual entry aktif. Auto entry hanya tersedia pada PAPER; tidak mengirim order sungguhan.';
  if(autoTradeMode!=='auto'){autoDiagnostic('AUTO OFF','aktifkan AUTO TRADE untuk entry PAPER');return;}
  if(mode!=='paper'){autoDiagnostic('MODE BUKAN PAPER','auto-entry dikunci agar tidak mengirim order exchange');return;}
- if(killed){autoDiagnostic('ENTRY LOCK ON','entry ditahan');return;}
+ if(killed){
+   const lockWhy=corruptTradeHistory.length
+     ? `data lama perlu diakui (${corruptTradeHistory.length} transaksi dikarantina)`
+     : dailyPnl<=-dailyLossLimitIDR()
+       ? `batas rugi harian tercapai (${fmtIDR(dailyPnl)} / batas ${fmtIDR(-dailyLossLimitIDR())})`
+       : Number(accountEquity)+Number(paperPnl)<=0
+         ? 'ekuitas PAPER tidak positif'
+         : 'lock manual aktif — tekan ENTRY LOCK untuk membuka jika risiko aman';
+   autoDiagnostic('ENTRY LOCK ON',lockWhy);return;
+}
  if(autoEntryBusy){autoDiagnostic('ORDER SEDANG DIPROSES','menunggu hasil submit',false);return;}if(hasValidPaperPosition()){autoDiagnostic('POSISI SUDAH AKTIF',`${paperPos?.side||'POSISI'} ${paperPos?.symbol||symbol} · tidak menambah posisi`);return;}
  const data=String($('#wickDataStatus')?.textContent||'');
  // Entry needs a fresh websocket kline AND ticker. REST recovery may keep chart
@@ -669,7 +678,7 @@ function runAutoPaperTrade(){
  // Forecast/oscillators are informational only; the final EMA20 + price-action signal is authoritative.
  const fallbackSignal=!!(candidate&&finalSide&&finalScore>=55&&candidate.extension<1.60);
  if(!candidate){autoDiagnostic('BELUM ADA KANDIDAT','struktur/wick/momentum belum membentuk setup');return;}
- if(!(candidate.eligible||candidate.fresh&&candidate.score>=30||fallbackSignal)){
+ if(!(candidate.eligible||fallbackSignal)){
    autoDiagnostic('KANDIDAT BELUM LOLOS',`score ${Math.round(Number(candidate.score)||0)} · ${candidate.reason||candidate.trendDirection||'menunggu konfirmasi'}`);return;
  }
  if(candidate.extension>=1.60){autoDiagnostic('ENTRY TERLAMBAT',`extension ${Number(candidate.extension).toFixed(2)} ATR`);return;}
@@ -679,9 +688,7 @@ function runAutoPaperTrade(){
  // Do not auto-enter when live wick/price pressure clearly conflicts with the setup direction.
  const pxNow=Number(livePrice||0);
  if(!(pxNow>0&&Number.isFinite(pxNow))){log(`AUTO WAIT · ${symbol} · harga ticker live tidak valid`);return;}
- const wickNow=forecastFromLastWick();
- if(wickNow?.direction==='POTENSI NAIK'&&side==='SELL'&&Number(livePrice)>Number(live.open)){autoDiagnostic('WICK BERLAWANAN','tekanan candle live naik; menunggu SELL lebih aman');return;}
- if(wickNow?.direction==='POTENSI TURUN'&&side==='BUY'&&Number(livePrice)<Number(live.open)){autoDiagnostic('WICK BERLAWANAN','tekanan candle live turun; menunggu BUY lebih aman');return;}
+ // V46: do not let a separate wick-forecast panel veto the primary EMA20 + price-action setup.
  // Recheck direction and displacement at the exact moment of entry.
  const liveMove=(Number(live.close)-Number(live.open))/(Number(candidate.analysis?.A)||1);
  if((side==='BUY'&&liveMove<=0)||(side==='SELL'&&liveMove>=0)){autoDiagnostic('MOMENTUM BELUM SEARAH',`${side} · live move ${liveMove.toFixed(2)} ATR`);return;}if(Math.abs(liveMove)>0.80){autoDiagnostic('GERAK HARGA TERLALU JAUH',`${liveMove.toFixed(2)} ATR · cegah chase`);return;}
@@ -874,141 +881,70 @@ function currentPaperPnl(price){if(!hasValidPaperPosition())return 0;const p=pap
 function paperNetTargetIDR(p){return Math.abs(Number(p?.entry||0)*Number(p?.qty||0))*IDR*PAPER_NET_TARGET_PCT/100}
 function paperMaxRiskIDR(p){const planned=Number(p?.risk||0);return Number.isFinite(planned)&&planned>0?planned:Math.abs(Number(p?.entry||0)*Number(p?.qty||0))*IDR*PAPER_MAX_RISK_PCT/100}
 function scoreEarlyPair(cs,timeframe=chartInterval){
- // EARLY-MOMENTUM FIX: include the currently forming candle supplied by the live ticker/kline.
- // Its close is refreshed from the latest price before scoring, so entry can trigger near momentum start, not one candle late.
- const closed=Array.isArray(cs)?cs:[];
- if(closed.length<35)return {eligible:false,score:0,bias:'NEUTRAL',reason:'Data candle belum cukup'};
- const a=analyzeData(closed);if(!a||!Number.isFinite(a.A)||a.A<=0)return {eligible:false,score:0,bias:'NEUTRAL',reason:'Indikator belum siap'};
- const c=closed.at(-1),prev=closed.at(-2),p3=closed.at(-4),cl=closed.map(x=>x.close),es=ema(cl,20),e=es.at(-1),ePrev=es.at(-4),A=a.A;
- const distance=(c.close-e)/A,extension=Math.abs(distance),recent=(c.close-p3.close)/A;
- const avgVol=closed.slice(-21,-1).reduce((sum,x)=>sum+x.volume,0)/20,volRatio=avgVol>0?c.volume/avgVol:1;
- const range=Math.max(c.high-c.low,Number.EPSILON),bodyPct=Math.abs(c.close-c.open)/range;
- const prior=closed.slice(-13,-1),priorHigh=Math.max(...prior.map(x=>x.high)),priorLow=Math.min(...prior.map(x=>x.low));
- const crossUp=prev.close<=es.at(-2)&&c.close>e,crossDown=prev.close>=es.at(-2)&&c.close<e;
- const upper=(c.high-Math.max(c.open,c.close))/range,lower=(Math.min(c.open,c.close)-c.low)/range;
- let long=0,short=0;
- long+=(c.close>e?15:0)+(e>ePrev?12:0)+Math.min(18,Math.max(0,recent*8))+(c.close>c.open?7:0)+(bodyPct>=.35?6:0)+(c.close>priorHigh?15:0)+(volRatio>=1.15?10:volRatio>=.85?5:0)+(crossUp?15:0)+(lower>upper*1.25&&lower>.35?5:0);
- short+=(c.close<e?15:0)+(e<ePrev?12:0)+Math.min(18,Math.max(0,-recent*8))+(c.close<c.open?7:0)+(bodyPct>=.35?6:0)+(c.close<priorLow?15:0)+(volRatio>=1.15?10:volRatio>=.85?5:0)+(crossDown?15:0)+(upper>lower*1.25&&upper>.35?5:0);
- const penalty=Math.max(0,extension-.65)*14;long=Math.max(0,long-penalty);short=Math.max(0,short-penalty);
- const baseBias=long>=short?'LONG':'SHORT';
- // Add BB(20,2) + RSI/MACD/StochRSI reaction as a secondary confirmation, not a hard requirement.
- // This avoids requiring every oscillator to align while still penalizing clear counter-momentum.
- const osc=bbOscillatorReaction(closed);
- const oscAligned=!!(osc.ready&&osc.direction===baseBias);
- const oscConflict=!!(osc.ready&&osc.direction!=='NEUTRAL'&&osc.direction!==baseBias&&Math.abs(Number(osc.delta)||0)>=3);
- if(oscAligned){if(baseBias==='LONG')long+=Math.min(10,4+Math.abs(osc.delta)*2);else short+=Math.min(10,4+Math.abs(osc.delta)*2);}
- if(oscConflict){if(baseBias==='LONG')long=Math.max(0,long-8);else short=Math.max(0,short-8);}
- // Unified indicator confluence: MA50 trend, EMA20, Bollinger/RSI/MACD/StochRSI,
- // S/R proximity, Fibonacci retracement zone, wick rejection, breakout and volume all
- // influence the same score used by scanner and entry. Visual toggles never disable logic.
- const sma50=closed.length>=50?closed.slice(-50).reduce((z,x)=>z+Number(x.close),0)/50:null;
- const priorSma50=closed.length>=55?closed.slice(-55,-5).reduce((z,x)=>z+Number(x.close),0)/50:null;
- const maBull=Number.isFinite(sma50)&&c.close>sma50&&(!Number.isFinite(priorSma50)||sma50>=priorSma50);
- const maBear=Number.isFinite(sma50)&&c.close<sma50&&(!Number.isFinite(priorSma50)||sma50<=priorSma50);
- if(maBull){long+=5;short=Math.max(0,short-2)} if(maBear){short+=5;long=Math.max(0,long-2)}
- const srData=sr(closed),brain=marketBrain(closed,timeframe),nearSupport=Math.abs(c.close-Number(srData.support||0))/A<0.45,nearResistance=Math.abs(Number(srData.resistance||0)-c.close)/A<0.45;
- // Structural evidence is part of the decision score, not a chart-only annotation.
- if(brain.direction==='LONG')long+=Math.min(14,brain.bullScore*.18);if(brain.direction==='SHORT')short+=Math.min(14,brain.bearScore*.18);
- if(brain.bosUp||brain.chochUp)long+=6;if(brain.bosDown||brain.chochDown)short+=6;
- if(brain.sweepLow)long+=5;if(brain.sweepHigh)short+=5;
- if(nearSupport&&lower>upper){long+=3} if(nearResistance&&upper>lower){short+=3}
- const swing=closed.slice(-50),swingHi=Math.max(...swing.map(x=>Number(x.high))),swingLo=Math.min(...swing.map(x=>Number(x.low))),swingRange=swingHi-swingLo;
- const fibLevels=swingRange>0?[swingHi-swingRange*.382,swingHi-swingRange*.5,swingHi-swingRange*.618]:[];
- const nearFib=fibLevels.some(level=>Math.abs(c.close-level)/A<0.18);
- // DECISION SOURCE: previous candle wick + trend; numeric score is display-only.
- const prevRange=Math.max(Number(prev.high)-Number(prev.low),Number.EPSILON);
- const prevUpper=(Number(prev.high)-Math.max(Number(prev.open),Number(prev.close)))/prevRange;
- const prevLower=(Math.min(Number(prev.open),Number(prev.close))-Number(prev.low))/prevRange;
- const prevBullReject=prevLower>=0.28&&prevLower>prevUpper*1.12;
- const prevBearReject=prevUpper>=0.28&&prevUpper>prevLower*1.12;
- const emaTrendUp=e>ePrev&&c.close>=e,emaTrendDown=e<ePrev&&c.close<=e;
- const trendUp=emaTrendUp||maBull,trendDown=emaTrendDown||maBear;
- const priorBullFollow=prev.close>prev.open&&prev.close>=p3.close;
- const priorBearFollow=prev.close<prev.open&&prev.close<=p3.close;
- const directionalCandleLong=c.close>c.open&&recent>0,directionalCandleShort=c.close<c.open&&recent<0;
- const pullbackLong=(prevBullReject&&c.close>=prev.close)||(lower>upper*1.15&&c.close>prev.close);
- const pullbackShort=(prevBearReject&&c.close<=prev.close)||(upper>lower*1.15&&c.close<prev.close);
- const wickTrendLong=trendUp&&(prevBullReject||priorBullFollow||pullbackLong)&&c.close>=prev.close;
- const wickTrendShort=trendDown&&(prevBearReject||priorBearFollow||pullbackShort)&&c.close<=prev.close;
- const wickTrendStrength=(wickTrendLong?3:0)+(wickTrendShort?3:0)+(prevBullReject||prevBearReject?2:0)+(trendUp||trendDown?2:0)+(directionalCandleLong||directionalCandleShort?1:0);
- const bias=wickTrendLong?'LONG':wickTrendShort?'SHORT':trendUp?'LONG':trendDown?'SHORT':brain.direction!=='NEUTRAL'?brain.direction:(long>=short?'LONG':'SHORT');
- if(nearFib){if(bias==='LONG'&&c.close>=prev.close)long+=3;else if(bias==='SHORT'&&c.close<=prev.close)short+=3;}
- const score=Math.round(Math.max(long,short));
- const directionGap=Math.abs(long-short);
- // Fresh continuation and pullback entries are both candidates; reject late extensions.
- // EARLY-ENTRY WINDOW: enter in the first 35% of the current candle OR within
- // the signal candle plus the next two candles. Reconstruct the recent signal from EMA
- // crosses / fresh pullback turns so a brief missed opening does not force a late chase.
- const tfSecondsByLabel={'1m':60,'3m':180,'5m':300,'15m':900,'30m':1800,'1h':3600,'2h':7200,'4h':14400,'6h':21600,'12h':43200,'1d':86400,'1w':604800,'1M':2592000};
- const tfSeconds=Math.max(60,Number(tfSecondsByLabel[normalizeTf(timeframe)])||900);
+ // V46: one decision model only — EMA20 trend + price action. S/R is contextual,
+ // not a competing indicator gate. Other oscillators never veto this setup.
+ const data=Array.isArray(cs)?cs:[];
+ if(data.length<25)return {eligible:false,fresh:false,score:0,bias:'NEUTRAL',reason:`candle kurang (${data.length}/25)`};
+ const a=analyzeData(data);
+ if(!a||!Number.isFinite(Number(a.A))||Number(a.A)<=0)return {eligible:false,fresh:false,score:0,bias:'NEUTRAL',reason:'ATR/data belum siap'};
+ const c=data.at(-1),p=data.at(-2),p2=data.at(-3),cl=data.map(x=>Number(x.close));
+ const es=ema(cl,20),e=Number(es.at(-1)),ePrev=Number(es.at(-4)),atr=Number(a.A);
+ if(!Number.isFinite(e)||!Number.isFinite(ePrev))return {eligible:false,fresh:false,score:0,bias:'NEUTRAL',reason:'EMA20 belum siap'};
+ const range=Math.max(Number(c.high)-Number(c.low),Number.EPSILON);
+ const body=Math.abs(Number(c.close)-Number(c.open))/range;
+ const upper=(Number(c.high)-Math.max(Number(c.open),Number(c.close)))/range;
+ const lower=(Math.min(Number(c.open),Number(c.close))-Number(c.low))/range;
+ const distance=(Number(c.close)-e)/atr,extension=Math.abs(distance);
+ const emaUp=e>ePrev,emaDown=e<ePrev;
+ const bull=Number(c.close)>Number(c.open),bear=Number(c.close)<Number(c.open);
+ const higherClose=Number(c.close)>Number(p.close),lowerClose=Number(c.close)<Number(p.close);
+ const bullReject=lower>=.30&&lower>upper*1.12&&Number(c.close)>=Number(c.low)+range*.55;
+ const bearReject=upper>=.30&&upper>lower*1.12&&Number(c.close)<=Number(c.high)-range*.55;
+ const reclaimUp=Number(p.close)<=Number(es.at(-2))&&Number(c.close)>e;
+ const reclaimDown=Number(p.close)>=Number(es.at(-2))&&Number(c.close)<e;
+ const longTrend=Number(c.close)>e&&emaUp;
+ const shortTrend=Number(c.close)<e&&emaDown;
+ // Early entry: trend aligned plus live candle direction / rejection / EMA reclaim.
+ const longPA=(bull&&higherClose)||(bullReject&&higherClose)||reclaimUp;
+ const shortPA=(bear&&lowerClose)||(bearReject&&lowerClose)||reclaimDown;
+ const longSetup=longTrend&&longPA;
+ const shortSetup=shortTrend&&shortPA;
+ let bias=longSetup?'LONG':shortSetup?'SHORT':(longTrend&&!shortTrend?'LONG':shortTrend&&!longTrend?'SHORT':'NEUTRAL');
+ const aligned=bias==='LONG'?longSetup:bias==='SHORT'?shortSetup:false;
+ const tfSec=({'1m':60,'3m':180,'5m':300,'15m':900,'30m':1800,'1h':3600,'2h':7200,'4h':14400,'6h':21600,'12h':43200,'1d':86400,'1w':604800,'1M':2592000})[normalizeTf(timeframe)]||900;
  const candleAge=Math.max(0,nowMarketMs()/1000-Number(c.time||0));
- const currentCandleEarly=candleAge<=tfSeconds*0.60;
- let signalAgeCandles=Infinity;
- const scanStart=Math.max(1,closed.length-3);
- for(let i=closed.length-1;i>=scanStart;i--){
-   const ci=closed[i],pi=closed[i-1],ei=es[i],epi=es[i-1];
-   const crossLong=pi.close<=epi&&ci.close>ei;
-   const crossShort=pi.close>=epi&&ci.close<ei;
-   const candleLong=ci.close>ci.open&&ci.close>=pi.close;
-   const candleShort=ci.close<ci.open&&ci.close<=pi.close;
-   const turnLong=candleLong&&(Math.min(ci.open,ci.close)-ci.low)>(ci.high-Math.max(ci.open,ci.close))*1.15;
-   const turnShort=candleShort&&(ci.high-Math.max(ci.open,ci.close))>(Math.min(ci.open,ci.close)-ci.low)*1.15;
-   const matched=bias==='LONG'?(crossLong||turnLong):(crossShort||turnShort);
-   if(matched){signalAgeCandles=(closed.length-1)-i;break;}
+ const early=candleAge<=tfSec*.85;
+ const notLate=extension<1.60;
+ const fresh=early&&notLate&&(bias==='LONG'?(bull||bullReject||reclaimUp):(bias==='SHORT'?(bear||bearReject||reclaimDown):false));
+ let score=0;
+ if(bias==='LONG'){
+   score=25+(longTrend?25:0)+(longPA?25:0)+(body>=.25?8:0)+(bullReject?7:0)+(reclaimUp?10:0);
+ }else if(bias==='SHORT'){
+   score=25+(shortTrend?25:0)+(shortPA?25:0)+(body>=.25?8:0)+(bearReject?7:0)+(reclaimDown?10:0);
  }
- const withinTwoCandles=signalAgeCandles<=2;
- const earlyWindow=currentCandleEarly||withinTwoCandles;
- const moveFromOpen=Math.abs(Number(c.close)-Number(c.open))/A;
- const moveNotLate=moveFromOpen<=0.80;
- const directionalLive=bias==='LONG'?(c.close>c.open&&c.close>=prev.close):(c.close<c.open&&c.close<=prev.close);
- // Keep the two-candle grace period conditional on live direction, low extension, and a
- // small current-candle move; never use it to justify chasing an exhausted impulse.
- const directionalCandle=bias==='LONG'?(c.close>c.open&&recent>0):(c.close<c.open&&recent<0);
- const pullbackTurn=bias==='LONG'?(lower>upper*1.15&&c.close>prev.close):(upper>lower*1.15&&c.close<prev.close);
- const recentSignal=(crossUp&&bias==='LONG')||(crossDown&&bias==='SHORT')||withinTwoCandles;
- const fresh=(recentSignal||((Math.abs(recent)<1.10)&&directionalLive)||pullbackTurn||directionalLive)&&extension<1.60&&earlyWindow&&moveNotLate;
- const rejectionAgainst=(bias==='LONG'&&upper>.42&&upper>lower*1.25)||(bias==='SHORT'&&lower>.42&&lower>upper*1.25);
+ score=Math.max(0,Math.min(100,Math.round(score-(extension>.9?(extension-.9)*12:0))));
+ const srData=sr(data),brain=marketBrain(data,timeframe);
+ const nearSupport=!!(Number(srData.support)>0&&Math.abs(Number(c.close)-Number(srData.support))/atr<.45);
+ const nearResistance=!!(Number(srData.resistance)>0&&Math.abs(Number(srData.resistance)-Number(c.close))/atr<.45);
+ const eligible=aligned&&fresh&&notLate&&score>=55;
  const reasons=[];
- if(extension>=0.95)reasons.push('anti-chase: harga sudah menjauh dari EMA20');
- if(!earlyWindow)reasons.push('terlambat: sinyal lebih dari 2 candle');
- if(!moveNotLate)reasons.push('terlambat: gerak candle sudah >0,45 ATR dari open');
- if(rejectionAgainst)reasons.push('wick rejection berlawanan dengan entry');
- if(a.regime==='EXTREME VOLATILITY')reasons.push('volatilitas ekstrem');
- if(volRatio<.55)reasons.push('volume relatif rendah — konfirmasi lebih lemah');
- if(!(wickTrendLong||wickTrendShort))reasons.push('sumbu candle sebelumnya belum sejalan dengan tren');
- if(!fresh)reasons.push('momentum belum fresh atau entry terlambat');
- if(oscConflict)reasons.push(`BB/RSI/MACD/StochRSI berlawanan (${osc.direction})`);
- if(baseBias==='LONG'&&maBear)reasons.push('MA50 menekan arah BUY');
- if(baseBias==='SHORT'&&maBull)reasons.push('MA50 menekan arah SELL');
- if(bias==='LONG'&&upper>.58)reasons.push('sumbu atas besar — risiko rejection');
- if(bias==='SHORT'&&lower>.58)reasons.push('sumbu bawah besar — risiko pantulan');
- const directionalOk=directionalCandle||pullbackTurn||(bias==='LONG'?recent>0:recent<0)||crossUp||crossDown;
- // Conservative quality gate: score alone is never an entry permission. Require a clear
- // directional edge, fresh/non-extended momentum, liquidity, and no nearby S/R wall.
- const scoreGapOk=true; // score gap is not an entry gate
- const volumeOk=volRatio>=0.35;
- const trendOk=(bias==='LONG'?trendUp:trendDown)||directionalCandle||pullbackTurn; // trend is contextual, not an extra hard gate when price action turns
- const srObstacle=bias==='LONG'?(nearResistance&&c.close<=priorHigh&&upper>.58):(nearSupport&&c.close>=priorLow&&lower>.58); // only block a clear wick rejection into a nearby level
- const slPct=Math.max(0.01,Number(document.querySelector('#slPct')?.value)||0.2);
- const rrInput=Math.max(0.5,Number(document.querySelector('#rr')?.value)||2);
- const feePct=Math.max(0,Number(document.querySelector('#fee')?.value)||0);
- const slipPct=Math.max(0,Number(document.querySelector('#slippage')?.value)||0);
- const roundTripCostPct=2*(feePct+slipPct);
- const netRewardPct=slPct*rrInput-roundTripCostPct;
- const netRiskPct=slPct+roundTripCostPct;
- const netRR=netRiskPct>0?netRewardPct/netRiskPct:0;
- const costsOk=netRewardPct>0&&netRR>=1.00;
- const wickTrendSetup=bias==='LONG'?wickTrendLong:wickTrendShort;
- const structureSetup=(bias==='LONG'?(brain.bosUp||brain.chochUp||brain.sweepLow||brain.nearSupport&&brain.bullishReject):(brain.bosDown||brain.chochDown||brain.sweepHigh||brain.nearResistance&&brain.bearishReject));
- const eligible=(wickTrendSetup||directionalCandle||pullbackTurn||structureSetup)&&extension<1.60&&fresh&&directionalOk&&(!rejectionAgainst||directionalLive)&&volumeOk&&trendOk&&!srObstacle&&costsOk;
- if(!scoreGapOk)reasons.push('arah belum unggul minimal 5 poin');
- if(!volumeOk)reasons.push('volume belum cukup untuk konfirmasi (min 0,55x)');
- if(!trendOk)reasons.push('arah berlawanan dengan tren MA50');
- if(srObstacle)reasons.push('hambatan support/resistance terlalu dekat');
- if(!costsOk)reasons.push(`target bersih tidak sebanding biaya (net R:R ${netRR.toFixed(2)}; perlu ≥1,00)`);
- // Score thresholds intentionally removed: entry decision follows previous-candle wick + trend.
- if(extension>=0.95)reasons.push('anti-chase: harga terlalu jauh dari EMA20');
- return {score,bias,analysis:a,brain,structure:brain.structure,marketEvent:brain.event,brainDirection:brain.direction,brainScore:brain.score,earlyScore:score,extension,fresh,eligible,directionGap,wickTrendStrength,priorUpper:prevUpper,priorLower:prevLower,priorWick:prevBullReject?'SUSUT BAWAH / POTENSI PANTUL':prevBearReject?'SUSUT ATAS / POTENSI TURUN':'SUMBU CAMPURAN',trendDirection:trendUp?'UPTREND':trendDown?'DOWNTREND':'SIDEWAYS',netRR,netRewardPct,netRiskPct,roundTripCostPct,signalAgeCandles:Number.isFinite(signalAgeCandles)?signalAgeCandles:null,oscDirection:osc.direction,oscAligned,oscConflict,maTrend:maBull?'BULLISH':maBear?'BEARISH':'NEUTRAL',nearFib,nearSupport,nearResistance,reason:eligible?`WICK + TREND OK · ${prevBullReject?'sumbu bawah candle sebelumnya':prevBearReject?'sumbu atas candle sebelumnya':'candle lanjutan'} · ${trendUp?'UPTREND':trendDown?'DOWNTREND':'SIDEWAYS'}`:reasons.slice(0,3).join(' · ')||'menunggu wick dan tren',closedTime:c.time,change:0,volume:0,upper,lower,volRatio};
+ if(bias==='NEUTRAL')reasons.push('EMA20 belum menentukan arah');
+ else if(!aligned)reasons.push('tunggu candle searah EMA20');
+ if(!fresh)reasons.push('tunggu price action/candle awal');
+ if(!notLate)reasons.push('entry terlambat: harga terlalu jauh dari EMA20');
+ if(score<55)reasons.push(`konfirmasi belum cukup (${score}/100)`);
+ return {
+   score,bias,analysis:a,brain,structure:brain?.structure,marketEvent:brain?.event,
+   brainDirection:brain?.direction,brainScore:brain?.score,earlyScore:score,
+   extension,fresh,eligible,directionGap:100,wickTrendStrength:(bullReject||bearReject)?1:0,
+   priorUpper:upper,priorLower:lower,priorWick:bullReject?'REJECTION BAWAH':bearReject?'REJECTION ATAS':'CANDLE PRICE ACTION',
+   trendDirection:emaUp?'UPTREND':emaDown?'DOWNTREND':'SIDEWAYS',
+   netRR:2,netRewardPct:0,netRiskPct:0,roundTripCostPct:0,signalAgeCandles:0,
+   oscDirection:'IGNORED',oscAligned:false,oscConflict:false,maTrend:'IGNORED',nearFib:false,
+   nearSupport,nearResistance,reason:eligible?`${bias} valid · EMA20 + price action searah`:reasons.slice(0,3).join(' · ')||'menunggu konfirmasi',
+   closedTime:c.time,change:0,volume:Number(c.volume)||0,upper,lower,
+   volRatio:1
+ };
 }
 async function scan(){
  if(hunterBusy)return; hunterBusy=true; $('#scanState').textContent='SCANNING BYBIT…';
@@ -1050,7 +986,7 @@ async function scan(){
       log(`SCAN-ONLY PAIR ROTATION · ${from} → ${best.symbol} · ${best.bias} ${best.score}/100 · ENTRY LOCK ON, order tidak dikirim`);
     }else if(best){$('#scanState').textContent=`ENTRY LOCK ON · SCAN SAJA · BEST ${best.symbol} ${best.bias} ${best.score}/100`;}
     else {$('#scanState').textContent='ENTRY LOCK ON · SCAN AKTIF · BELUM ADA KANDIDAT';}
-    autoDiagnostic('ENTRY LOCK ON','pemindaian/pindah pair tetap aktif; order ditahan sampai lock dibuka');
+    autoDiagnostic('ENTRY LOCK ON','scanner tetap aktif dan pair boleh berpindah untuk observasi; order ditahan. Periksa alasan lock pada status ini.');
     return;
    }
 
@@ -1432,6 +1368,6 @@ function initV25BybitUI(){
  updateBtHeader();loadBtOrderBook();clearInterval(btOrderBookTimer);btOrderBookTimer=setInterval(()=>{loadBtOrderBook();updateBtHeader()},2000);
 }
 
-(async()=>{killed=true;auto=true;autoTimeframe=true;autoTradeMode='auto';$('#autoTfToggle').textContent='AUTO TF: ON';$('#autoToggle').textContent='PAIR SCAN ONLY';$('#autoToggle').classList.add('active');$('#killBtn').textContent='ENTRY LOCK: ON';$('#killBtn').classList.add('active');initChart();restore();updatePairLossUI(symbol);renderPaperOrderPreview();$('#symbolTitle').textContent=symbol;symbolGeneration++;const bootGen=symbolGeneration;try{await diagnoseMarketAccess();await syncMarketClock();setInterval(syncMarketClock,30000);const historyOK=await loadCandles(symbol,bootGen);await loadEntryCandles(symbol,bootGen);if(bootGen===symbolGeneration){connectWS(symbol,bootGen);}renderPosition();initV25BybitUI();initV26IndicatorUI();if(historyOK)await scan();else { $('#scanState').textContent='BYBIT MARKET BLOCKED'; $('#conn').textContent=`MARKET UNAVAILABLE · ${marketDiagnostic.direct} · ${marketDiagnostic.proxy}`; }log('System ready · BYBIT LINEAR · '+(TF_LABEL[normalizeTf(chartInterval)]||chartInterval)+' · PAPER AUTO ENTRY ON · scanner multi-pair + risk guard · WebSocket-first · REST history/reconciliation')}catch(e){log('Init error: '+e.message);try{connectWS(symbol,bootGen)}catch{}}setInterval(updateUI,1000);setInterval(()=>{if(mode==='demo')account().catch(()=>{});},2000);setInterval(()=>{if(mode==='demo')fetchDemoHistory().catch(()=>{});},7000);setInterval(scan,HUNTER.scanMs)})();
+(async()=>{killed=true;auto=true;autoTimeframe=true;autoTradeMode='auto';$('#autoTfToggle').textContent='AUTO TF: ON';$('#autoToggle').textContent='AUTO SCAN: ON';$('#autoToggle').classList.add('active');$('#killBtn').textContent='ENTRY LOCK: ON';$('#killBtn').classList.add('active');initChart();restore();updatePairLossUI(symbol);renderPaperOrderPreview();$('#symbolTitle').textContent=symbol;symbolGeneration++;const bootGen=symbolGeneration;try{await diagnoseMarketAccess();await syncMarketClock();setInterval(syncMarketClock,30000);const historyOK=await loadCandles(symbol,bootGen);await loadEntryCandles(symbol,bootGen);if(bootGen===symbolGeneration){connectWS(symbol,bootGen);}renderPosition();initV25BybitUI();initV26IndicatorUI();if(historyOK)await scan();else { $('#scanState').textContent='BYBIT MARKET BLOCKED'; $('#conn').textContent=`MARKET UNAVAILABLE · ${marketDiagnostic.direct} · ${marketDiagnostic.proxy}`; }log('System ready · BYBIT LINEAR · '+(TF_LABEL[normalizeTf(chartInterval)]||chartInterval)+' · PAPER AUTO ENTRY ON · scanner multi-pair + risk guard · WebSocket-first · REST history/reconciliation')}catch(e){log('Init error: '+e.message);try{connectWS(symbol,bootGen)}catch{}}setInterval(updateUI,1000);setInterval(()=>{if(mode==='demo')account().catch(()=>{});},2000);setInterval(()=>{if(mode==='demo')fetchDemoHistory().catch(()=>{});},7000);setInterval(scan,HUNTER.scanMs)})();
 
 </script></body></html>
