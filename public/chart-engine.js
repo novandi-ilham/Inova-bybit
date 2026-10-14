@@ -3,7 +3,7 @@ class CanvasChart {
   constructor(host){
     this.host=host; host.innerHTML='';
     this.canvas=document.createElement('canvas'); this.canvas.className='chart'; host.appendChild(this.canvas);
-    this.ctx=this.canvas.getContext('2d'); this.candles=[]; this.ema=[]; this.markers=[]; this.position=null; this.srLevels=null; this.brain=null; this.offset=0; this.visible=50; this.drag=false; this.lastX=0; this.pointers=new Map(); this.lastPinchDistance=0; this.lastTap=0; this.panStartOffset=0;
+    this.ctx=this.canvas.getContext('2d'); this.candles=[]; this.ema=[]; this.markers=[]; this.position=null; this.srLevels=null; this.brain=null; this.setup=null; this.offset=0; this.visible=50; this.drag=false; this.lastX=0; this.pointers=new Map(); this.lastPinchDistance=0; this.lastTap=0; this.panStartOffset=0;
     this.series={setData:d=>{this.setCandles(d.map(x=>({...x,volume:0})))},update:d=>{this.updateCandle(d)},createPriceLine:o=>{const x={...o};this.positionLines??=[];this.positionLines.push(x);this.render();return x},removePriceLine:x=>{this.positionLines=(this.positionLines||[]).filter(y=>y!==x);this.render()},setMarkers:m=>{this.setMarkers(m)}};
     this.emaSeries={setData:d=>{this.ema=d.map(x=>x.value);this.render()},update:d=>{this.ema[this.candles.length-1]=d.value;this.render()}};
     this.resizeObserver=new ResizeObserver(()=>this.resize()); this.resizeObserver.observe(host); this.resize();
@@ -56,6 +56,7 @@ class CanvasChart {
   setPosition(p){this.position=p;this.render()}
   setSR(x){this.srLevels=x;this.render()}
   setBrain(x){this.brain=x&&typeof x==='object'?x:null;this.render()}
+  setSetup(x){this.setup=x&&typeof x==='object'?x:null;this.render()}
   fitContent(){this.visible=Math.min(50,Math.max(30,this.candles.length));this.offset=0;this.clamp();this.render()}
   clamp(){const maxOffset=Math.max(0,this.candles.length-Math.max(30,Math.min(170,this.visible||90)));this.offset=Math.max(0,Math.min(this.offset,maxOffset))}
   distance(){const a=[...this.pointers.values()];if(a.length<2)return 0;return Math.hypot(a[0].x-a[1].x,a[0].y-a[1].y)}
@@ -100,7 +101,14 @@ class CanvasChart {
   text(t,x,y,fill='#9aa9bc',size=10,align='left'){const c=this.ctx;c.fillStyle=fill;c.font=`${size}px system-ui`;c.textAlign=align;c.fillText(t,x,y)}
   render(){const c=this.ctx,W=this.host.clientWidth,H=this.host.clientHeight;if(!W||!H)return;c.clearRect(0,0,W,H);c.fillStyle='rgba(5,10,16,.98)';c.fillRect(0,0,W,H);if(!this.candles.length){this.text('Menunggu candle Bybit Futures…',W/2,H/2,'#7f90a6',13,'center');return}const r=this.range(),cw=Math.max(2,(W-88)/r.vis*.62);for(let g=0;g<=5;g++){const y=8+g*(H-34)/5;this.line(48,y,W-40,y,'#132030');const v=r.hi-g*(r.hi-r.lo)/5;this.text(this.fmt(v),W-6,y+3,'#7f90a6',10,'right')}for(let i=0;i<r.cs.length;i++){const idx=r.start+i,q=r.cs[i],x=this.px(idx,r),yo=this.py(q.open,r),yc=this.py(q.close,r),yh=this.py(q.high,r),yl=this.py(q.low,r);const up=q.close>=q.open;this.line(x,yh,x,yl,up?'#19d59a':'#ff5c72',1);c.fillStyle=up?'#19d59a':'#ff5c72';c.fillRect(x-cw/2,Math.min(yo,yc),cw,Math.max(1,Math.abs(yc-yo)));if(this.ema.length){const ei=idx-(this.candles.length-this.ema.length);if(ei>0&&ei<this.ema.length){const prev=this.ema[ei-1];this.line(this.px(idx-1,r),this.py(prev,r),x,this.py(this.ema[ei],r),'#f4c44f',2)}}}
     if(this.srLevels){
-      for(const [v,label,col] of [[this.srLevels.resistance,'R','#ffb65c'],[this.srLevels.support,'S','#4de1ff']])if(Number.isFinite(Number(v))&&Number(v)>0){const y=this.py(Number(v),r);this.line(48,y,W-40,y,col+'88',1,[5,5]);this.text(`${label} ${this.fmt(v)}`,W-45,y-4,col,9,'right')}
+      const atr=Number(this.brain?.atr)||Math.max((r.hi-r.lo)*.025,1e-8);
+      // Highlight approximate supply/demand POI bands around nearest confirmed levels.
+      for(const [v,label,col] of [[this.srLevels.resistance,'SUPPLY / POI','#ff5c72'],[this.srLevels.support,'DEMAND / POI','#19d59a']]){
+        const price=Number(v); if(!Number.isFinite(price)||price<=0)continue;
+        const half=Math.max(atr*.16,price*.00015),y1=this.py(price+half,r),y2=this.py(price-half,r);
+        if(Math.max(y1,y2)>=8&&Math.min(y1,y2)<=H-28){c.fillStyle=col+'20';c.fillRect(48,Math.max(8,Math.min(y1,y2)),W-88,Math.max(2,Math.min(H-28,Math.max(y1,y2))-Math.max(8,Math.min(y1,y2))));this.line(48,this.py(price,r),W-40,this.py(price,r),col+'aa',1,[5,4]);this.text(`${label} ${this.fmt(price)}`,W-45,Math.max(18,Math.min(H-30,this.py(price,r)-4)),col,9,'right');}
+      }
+      for(const [v,label,col] of [[this.srLevels.resistance,'R','#ffb65c'],[this.srLevels.support,'S','#4de1ff']])if(Number.isFinite(Number(v))&&Number(v)>0){const y=this.py(Number(v),r);this.line(48,y,W-40,y,col+'55',1,[5,5]);}
     }
     // H/L marks: visible-range extreme plus latest confirmed local swing points.
     const visible=r.cs;
@@ -126,7 +134,15 @@ class CanvasChart {
     if(this.position){for(const [v,col,label] of [[+this.position.entry,this.position.side==='BUY'?'#19d59a':'#ff5c72',this.position.side==='BUY'?'AUTO BUY':'AUTO SELL'],[+this.position.sl,'#ff5c72','SL'],[+this.position.tp,'#4de1ff','TP']])if(Number.isFinite(v)){const y=this.py(v,r);this.line(48,y,W-40,y,col,1,[7,5]);this.text(`${label} ${this.fmt(v)}`,W-45,y-4,col,9,'right')}}
     for(const m of this.markers){const idx=this.candles.findIndex(q=>q.time===Number(m.time));if(idx<r.start||idx>=r.end)continue;const q=this.candles[idx],x=this.px(idx,r),y=this.py(m.position==='aboveBar'?q.high:q.low,r)+(m.position==='aboveBar'?-14:14);this.text(m.shape==='arrowDown'?'▼':'▲',x,y,m.color||'#fff',13,'center');this.text(m.text||'',x,y+(m.position==='aboveBar'?-12:12),m.color||'#fff',8,'center')}
     this.text(symbol||'',52,16,'#dfe8f2',11,'left');this.text('BYBIT LINEAR · CANVAS',W-45,16,'#7f90a6',10,'right');
-    if(this.brain){const b=this.brain,dir=b.direction||'NEUTRAL',col=dir==='LONG'?'#19d59a':dir==='SHORT'?'#ff5c72':'#f4c44f';const label=`BRAIN ${dir} · ${b.structure||'BUILDING'} · ${b.event||'NO BREAK'}`;c.fillStyle='rgba(5,10,16,.88)';c.fillRect(54,24,Math.min(W-110,Math.max(180,label.length*6.1)),18);this.text(label,60,37,col,10,'left');}
+    if(this.brain){const b=this.brain,dir=b.direction||'NEUTRAL',col=dir==='LONG'?'#19d59a':dir==='SHORT'?'#ff5c72':'#f4c44f';const label=`BRAIN ${dir} · ${b.structure||'BUILDING'} · ${b.event||'NO BREAK'}`;c.fillStyle='rgba(5,10,16,.88)';c.fillRect(54,24,Math.min(W-110,Math.max(180,label.length*6.1)),18);this.text(label,60,37,col,10,'left');
+      const last=this.candles.at(-1);if(last&&b.event&&b.event!=='NONE'){const bullish=/↑|LOW/.test(b.event),col2=bullish?'#19d59a':'#ff5c72',yy=this.py(bullish?last.low:last.high,r)+(bullish?18:-18);this.text(b.event,this.px(this.candles.length-1,r),Math.max(52,Math.min(H-30,yy)),col2,10,'center');}
+    }
+    if(this.setup&&['BUY','SELL'].includes(this.setup.side)){
+      const z=this.setup,valid=z.valid!==false,col=z.side==='BUY'?'#19d59a':'#ff5c72';
+      const levels=[[Number(z.entry),col,`${z.side} ENTRY`],[Number(z.sl),'#ff5c72','SL'],[Number(z.tp),'#4de1ff','TARGET']];
+      for(const [v,color,label] of levels){if(!Number.isFinite(v)||v<=0)continue;const y=this.py(v,r);if(y<8||y>H-26)continue;this.line(48,y,W-40,color,1,label==='SL'?[3,4]:[7,4]);this.text(`${label} ${this.fmt(v)}`,W-45,Math.max(18,y-4),color,9,'right');}
+      const banner=`SETUP ${z.side} · ${valid?'TERKONFIRMASI':'MENUNGGU KONFIRMASI'} · SCORE ${Math.round(Number(z.score)||0)}`;c.fillStyle='rgba(5,10,16,.9)';c.fillRect(54,45,Math.min(W-110,Math.max(205,banner.length*5.8)),18);this.text(banner,60,58,valid?col:'#f4c44f',9,'left');
+    }
     const last=this.candles.at(-1);if(last)this.text(this.fmt(last.close),W-45,this.py(last.close,r)-5,last.close>=last.open?'#19d59a':'#ff5c72',10,'right');
   }
   fmt(v){const n=Number(v);if(!Number.isFinite(n))return '—';return n>=1000?n.toLocaleString('en-US',{maximumFractionDigits:2}):n.toLocaleString('en-US',{maximumFractionDigits:8})}
