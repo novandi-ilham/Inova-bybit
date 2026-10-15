@@ -22,7 +22,7 @@
 <aside class="left">
 <section class="panel"><div class="phead">PAIR SCANNER <span class="pill" id="scanState">READY</span></div><div class="pbody" style="display:grid;grid-template-columns:1fr 1fr;gap:7px"><button class="btn" id="refreshScan">Refresh</button><button class="btn pairnext" id="nextPairBtn">⇄ GANTI PAIR</button><button class="btn" id="autoToggle" style="grid-column:1/-1">PAIR SCAN ONLY</button></div><div class="symbols" id="symbols"></div><div class="pbody" style="padding-top:8px"><div class="small muted" style="margin-bottom:6px">KANDIDAT TERBAIK · SCAN CANDLE <span id="scanTfLabel">15M</span></div><div id="scanCandidates" class="scan-candidates"><div class="muted small">Tekan Refresh untuk memindai kandidat.</div></div></div></section>
 <section class="panel section"><div class="phead">ACCOUNT · IDR</div><div class="pbody"><div class="kv"><span>Status</span><b id="acctStatus">PAPER</b></div><div class="kv"><span>Wallet</span><b id="balance">Rp 10.000.000</b></div><div class="kv"><span>Available</span><b id="available">Rp 10.000.000</b></div><div class="kv"><span>Unrealized <em id="unrealizedLive" style="font-style:normal;font-size:9px;color:#19d59a;border:1px solid #176c53;border-radius:999px;padding:2px 5px;margin-left:4px">LIVE</em></span><b id="unrealized">Rp 0</b></div><div class="kv"><span>Paper PnL</span><b id="paperPnl">Rp 0</b></div><div class="muted" style="font-size:11px;margin-top:6px">Wallet berubah setelah posisi ditutup; PnL berjalan tampil di Unrealized.</div><button class="btn" style="width:100%;margin-top:8px" id="accountBtn">Sync Bybit Account</button></div></section>
-<section class="panel section"><div class="phead">RISK GUARD</div><div class="pbody form"><label>Risk / trade %<input id="risk" type="number" value="0.20" min="0.2" max="0.2" step="0.1"></label><label>Daily loss limit %<input id="dailyLoss" type="number" value="3" min="0.5" max="10"></label><label>Max positions<input id="maxPos" type="number" value="1" min="1" max="5"></label><label>Pair loss limit<input id="cooldownLosses" type="number" value="1" min="1" max="1" step="1" readonly></label><label>Fee %<input id="fee" type="number" value="0.04" step="0.01"></label><label>Slippage %<input id="slippage" type="number" value="0.03" step="0.01"></label><label>Hard loss cutoff (% equity)<input id="maxFloatLoss" type="number" value="0.2" min="0.2" max="0.2" step="0.1" readonly></label><div class="kv"><span>Daily loss</span><b id="dailyLossOut">Rp 0</b></div><div class="kv"><span>Consecutive loss (global)</span><b id="lossStreak">0</b></div><div class="kv"><span>Pair loss streak · <span id="pairLossSymbol">BTCUSDT</span></span><b id="pairLossStreak">0 / 1</b></div></div></section>
+<section class="panel section"><div class="phead">RISK GUARD</div><div class="pbody form"><label>Risk / trade %<input id="risk" type="number" value="0.20" min="0.2" max="0.2" step="0.1"></label><label>Daily loss limit %<input id="dailyLoss" type="number" value="3" min="0.5" max="10"></label><label>Max entry bertahap / posisi<input id="maxPos" type="number" value="5" min="1" max="10" step="1"><small class="muted">Jumlah entry searah pada pair yang sama (PAPER). Batas 10 untuk mencegah penambahan tanpa kendali.</small></label><label>Pair loss limit<input id="cooldownLosses" type="number" value="1" min="1" max="1" step="1" readonly></label><label>Fee %<input id="fee" type="number" value="0.04" step="0.01"></label><label>Slippage %<input id="slippage" type="number" value="0.03" step="0.01"></label><label>Hard loss cutoff (% equity)<input id="maxFloatLoss" type="number" value="0.2" min="0.2" max="0.2" step="0.1" readonly></label><div class="kv"><span>Daily loss</span><b id="dailyLossOut">Rp 0</b></div><div class="kv"><span>Consecutive loss (global)</span><b id="lossStreak">0</b></div><div class="kv"><span>Pair loss streak · <span id="pairLossSymbol">BTCUSDT</span></span><b id="pairLossStreak">0 / 1</b></div></div></section>
 </aside>
 <main>
 <section class="panel"><div class="tabs"><button class="btn active" data-tf="15m">15M</button><button class="btn" data-tf="5m">5m</button><button class="btn" data-tf="1h">1H</button><button class="btn" data-tf="4h">4H</button><button class="btn" data-tf="1d">1D</button><div class="bt-more-wrap"><button class="btn" id="moreTfBtn">More ▾</button><div class="bt-more-menu" id="moreTfMenu"><div class="bt-more-title">INTERVAL CHART</div><div class="bt-more-grid"><button data-moretf="1m">1m</button><button data-moretf="3m">3m</button><button data-moretf="5m">5m</button><button data-moretf="15m" class="active">15m</button><button data-moretf="30m">30m</button><button data-moretf="2h">2j</button><button data-moretf="6h">6j</button><button data-moretf="12h">12j</button><button data-moretf="1d">1D</button><button data-moretf="1M">1M</button><button data-moretf="1w">1W</button></div><button class="bt-more-custom" id="customTfBtn">Kustomisasi Interval <span style="float:right">›</span></button></div></div><span class="pill" id="visualTfPill">VIEW 15M</span><span class="pill">EMA20</span><span class="pill">PRICE ACTION</span><span class="pill">AUTO S/R</span></div><div class="bt-tools"><button class="btn bt-toolicon" id="drawToolBtn" title="Gambar">✎</button><button class="btn bt-toolicon" id="settingsToolBtn" title="Pengaturan chart">⚙</button><button class="btn bt-toolicon" id="gridToolBtn" title="Grid">▦</button><button class="btn" id="autoTfToggle" style="white-space:nowrap;border-color:#2d8d76">AUTO TF: ON</button><span class="bt-note">Sistem memindai momentum lintas timeframe; matikan AUTO TF untuk memilih timeframe sendiri.</span></div>
@@ -633,7 +633,7 @@ function autoDiagnostic(reason,detail='',blocked=true){
 function runAutoPaperTrade(){
  const btn=$('#tradeModeToggle'),help=$('#tradeModeHelp');
  if(btn){btn.textContent=autoTradeMode==='auto'?'AUTO TRADE: ON · PAPER':'AUTO TRADE: OFF · MANUAL';btn.classList.toggle('active',autoTradeMode==='auto');btn.classList.toggle('buy',autoTradeMode==='auto');}
- if(help)help.textContent=autoTradeMode==='auto'?'AUTO PAPER aktif: keputusan utama EMA20 + price action; support/resistance hanya konteks. Satu posisi, data segar, dan Risk Guard tetap wajib.':'Manual entry aktif. Auto entry hanya tersedia pada PAPER; tidak mengirim order sungguhan.';
+ if(help)help.textContent=autoTradeMode==='auto'?'AUTO PAPER aktif: sinyal searah pada pair yang sama dapat menambah entry sampai batas Max entry bertahap. Data segar dan Risk Guard tetap wajib.':'Manual entry aktif. Auto entry hanya tersedia pada PAPER; tidak mengirim order sungguhan.';
  if(autoTradeMode!=='auto'){autoDiagnostic('AUTO OFF','aktifkan AUTO TRADE untuk entry PAPER');return;}
  if(mode!=='paper'){autoDiagnostic('MODE BUKAN PAPER','auto-entry dikunci agar tidak mengirim order exchange');return;}
  if(killed){
@@ -646,7 +646,7 @@ function runAutoPaperTrade(){
          : 'lock manual aktif — tekan ENTRY LOCK untuk membuka jika risiko aman';
    autoDiagnostic('ENTRY LOCK ON',lockWhy);return;
 }
- if(autoEntryBusy){autoDiagnostic('ORDER SEDANG DIPROSES','menunggu hasil submit',false);return;}if(hasValidPaperPosition()){autoDiagnostic('POSISI SUDAH AKTIF',`${paperPos?.side||'POSISI'} ${paperPos?.symbol||symbol} · tidak menambah posisi`);return;}
+ if(autoEntryBusy){autoDiagnostic('ORDER SEDANG DIPROSES','menunggu hasil submit',false);return;}if(hasValidPaperPosition()){const cap=Math.max(1,Math.min(10,Math.floor(Number($('#maxPos')?.value)||5)));const same=paperPos.symbol===symbol;const nextSide=String(paperPos.side||'').toUpperCase();if(!same||paperPos.entryCount>=cap){autoDiagnostic('POSISI AKTIF · ENTRY TAMBAHAN DITAHAN',`${paperPos.side} ${paperPos.symbol} · tahap ${paperPos.entryCount||1}/${cap} · pair/arah sama dan slot tersedia diperlukan`);return;}}
  const data=String($('#wickDataStatus')?.textContent||'');
  // Entry needs a fresh websocket kline AND ticker. REST recovery may keep chart
  // visible, but should not trigger an automatic entry from stale/mixed prices.
@@ -694,7 +694,7 @@ function runAutoPaperTrade(){
  const liveMove=(Number(live.close)-Number(live.open))/(Number(candidate.analysis?.A)||1);
  if((side==='BUY'&&liveMove<=0)||(side==='SELL'&&liveMove>=0)){autoDiagnostic('MOMENTUM BELUM SEARAH',`${side} · live move ${liveMove.toFixed(2)} ATR`);return;}if(Math.abs(liveMove)>0.80){autoDiagnostic('GERAK HARGA TERLALU JAUH',`${liveMove.toFixed(2)} ATR · cegah chase`);return;}
  const key=[symbol,tf,live.time,side].join(':');if(key===autoEntryLastKey){autoDiagnostic('SINYAL SUDAH DIPROSES',`${side} ${symbol} · candle sama`,false);return;}
- const guardReasons=guard();if(guardReasons.length){autoDiagnostic('RISK GUARD MENAHAN',guardReasons.slice(0,2).join(' · '));return;}
+ const guardReasons=guard().filter(r=>!r.includes('sudah ada posisi aktif'));if(hasValidPaperPosition()){const cap=Math.max(1,Math.min(10,Math.floor(Number($('#maxPos')?.value)||5)));if(paperPos.symbol!==symbol||paperPos.side!==(side==='BUY'?'BUY':'SELL')){guardReasons.push('posisi aktif berbeda pair/arah');}else if((Number(paperPos.entryCount)||1)>=cap){guardReasons.push(`batas entry bertahap ${cap} tercapai`);}}if(guardReasons.length){autoDiagnostic('RISK GUARD MENAHAN',guardReasons.slice(0,2).join(' · '));return;}
  autoEntryLastKey=key;autoEntryBusy=true;
  autoDiagEntries++;autoDiagnostic('ENTRY PAPER DIKIRIM',`${side} ${symbol} · ${tf.toUpperCase()} · score ${Math.round(Number(candidate.score)||0)} · data ${wsTickerFresh?'WS':'REST fallback'}`,false);
  log(`AUTO PAPER WICK+TREND CHECK · ${side} ${symbol} · ${tf.toUpperCase()} · ticker ${wsTickerFresh?'WS':'REST'} · ${candidate.priorWick} · ${candidate.trendDirection} · candle age ${(Math.max(0,nowMarketMs()/1000-Number(live.time||0))/Math.max(60,intervalSec())*100).toFixed(0)}% · signal age ${Number.isFinite(candidate.signalAgeCandles)?candidate.signalAgeCandles:'current'} candle · move ${liveMove.toFixed(2)} ATR`);
@@ -1074,14 +1074,15 @@ function syncPaperStateUI(a=null){
   if(statusEl){statusEl.className='warning';statusEl.textContent=`POSISI AKTIF · ${p.side} ${p.symbol} · Entry ${fmtTradeP(p.entry)}`;}
   return true;
 }
-function guard(){if(enforceRiskLock()||killed)return['ENTRY LOCK / batas risiko tercapai'];if(isPairLossBlocked(symbol))return[`PAIR ${symbol} DIHENTIKAN · pair dalam cooldown setelah loss`];if(hasValidPaperPosition())return['sudah ada posisi aktif'];if(dailyPnl<=-dailyLossLimitIDR())return['daily loss limit tercapai'];return []}
+function guard(){if(enforceRiskLock()||killed)return['ENTRY LOCK / batas risiko tercapai'];if(isPairLossBlocked(symbol))return[`PAIR ${symbol} DIHENTIKAN · pair dalam cooldown setelah loss`];if(hasValidPaperPosition()&&(paperPos.symbol!==symbol||!['BUY','SELL'].includes(paperPos.side)))return['posisi aktif pada pair lain'];if(dailyPnl<=-dailyLossLimitIDR())return['daily loss limit tercapai'];return []}
 function positionSize(price,sl){let risk=accountEquity*Number($('#risk').value)/100;let dist=Math.abs(price-sl);return dist?risk/dist:Number($('#qty').value)}
-function openPaper(side,forcedAnalysis=null,allowManualScaleIn=false){
-  // MANUAL SCALE-IN: repeated clicks may add to the same-side PAPER position,
-  // up to four entries total. Opposite side / different symbol remains blocked.
+function openPaper(side,forcedAnalysis=null,allowScaleIn=false){
+  // Scale-in PAPER: repeated manual/automatic signals may add to the same pair and side,
+  // up to the user-configured cap (1–10 stages). Opposite side/different pair is blocked.
   const existing=hasValidPaperPosition()?paperPos:null;
-  if(existing && !(allowManualScaleIn && mode==='paper' && existing.symbol===symbol && existing.side===String(side).toUpperCase() && (Number(existing.entryCount)||1)<4)){
-    syncPaperStateUI();log(`ENTRY BLOCKED: posisi ${existing.side} ${existing.symbol} aktif. Entry berulang hanya boleh searah, simbol sama, maksimal 4 tahap.`);return false
+  const entryCap=Math.max(1,Math.min(10,Math.floor(Number($('#maxPos')?.value)||5)));
+  if(existing && !(allowScaleIn && mode==='paper' && existing.symbol===symbol && existing.side===String(side).toUpperCase() && (Number(existing.entryCount)||1)<entryCap)){
+    syncPaperStateUI();log(`ENTRY BLOCKED: posisi ${existing.side} ${existing.symbol} aktif. Tambahan hanya searah/pair sama, batas ${entryCap} tahap.`);return false
   }
   if(enforceRiskLock()||killed||dailyPnl<=-dailyLossLimitIDR()){log('ENTRY BLOCKED: Risk Guard / daily loss limit tercapai');alert('Entry diblokir: Risk Guard mengunci entry. Periksa PnL dan batas risiko.');return false}
   let a=forcedAnalysis||analyze();
@@ -1100,9 +1101,9 @@ function openPaper(side,forcedAnalysis=null,allowManualScaleIn=false){
   const riskPerUnit=(Math.abs(p-sl)+(p+exitRef)*feePct+exitRef*slipPct)*IDR;
   const riskQty=riskPerUnit>0?riskMoney/riskPerUnit:0;
   const manualQty=Math.max(0.000001,Number($('#qty').value)||0.001);
-  // PAPER manual entries reserve risk budget for up to four manual stages.
+  // Each add uses a fraction of the risk budget; the configurable cap prevents unbounded stacking.
   const isScaleIn=!!existing;
-  const qty=mode==='paper'?(riskQty*0.25):manualQty;
+  const qty=mode==='paper'?(riskQty/entryCap):manualQty;
   const notional=qty*p*IDR;
   const margin=mode==='paper'?notional/Math.max(1,leverage):0;
   if(mode==='paper'&&margin>accountEquity+paperPnl){log(`ENTRY BLOCKED: margin ${fmtIDR(margin)} melebihi available balance`);syncPaperStateUI(a);return false;}
@@ -1116,17 +1117,17 @@ function openPaper(side,forcedAnalysis=null,allowManualScaleIn=false){
     existing.qty=totalQty; existing.notional=totalQty*existing.entry*IDR;
     existing.margin=(Number(existing.margin)||0)+margin;
     existing.entryCount=(Number(existing.entryCount)||1)+1;
-    existing.risk=(Number(existing.risk)||0)+riskMoney*0.25;
+    existing.risk=(Number(existing.risk)||0)+riskMoney/entryCap;
     // Keep the original protective stop; TP follows the updated weighted-average entry.
     existing.tp=existing.side==='BUY'?existing.entry*(1+sp*rr):existing.entry*(1-sp*rr);
     existing.lastAddedAt=Date.now();
     addTradeMarker('entry',{...existing,entry:p,opened:Date.now(),entryCandleTime:a.c.time});
     renderTradeVisuals();persist();syncPaperStateUI(a);
-    log(`MANUAL PAPER SCALE-IN ${side} ${symbol} · TAHAP ${existing.entryCount}/4 · TAMBAH ${qty.toFixed(6)} · AVG ${fmtTradeP(existing.entry)} · SL dipertahankan · TP disesuaikan · SCORE ${a.score.toFixed(0)}/100`);
+    log(`PAPER SCALE-IN ${allowScaleIn?'AUTO':'MANUAL'} ${side} ${symbol} · TAHAP ${existing.entryCount}/${entryCap} · TAMBAH ${qty.toFixed(6)} · AVG ${fmtTradeP(existing.entry)} · SL dipertahankan · TP disesuaikan · SCORE ${a.score.toFixed(0)}/100`);
     return true;
   }
   paperPos={symbol,side,entry:p,qty,sl,tp,initialSL:sl,be:false,partial:false,trail:false,opened:Date.now(),risk:riskMoney*0.25,margin,leverage,notional,entryCount:1,entryCandleTime:a.c.time,entryScore:a.score,entryBias:a.bias,peakPnl:0,autoTrailPeak:0,autoTrailActive:false,negativeScans:0};
-  addTradeMarker('entry',paperPos); renderTradeVisuals(); persist(); syncPaperStateUI(a); log(`MANUAL PAPER ${side} ${symbol} · ENTRY TAHAP 1/4 · ${fmtTradeP(p)} · SL ${fmtTradeP(sl)} · profit guard aktif setelah target awal, lalu BE + giveback 20% tanpa TP tetap · SCORE ${a.score.toFixed(0)}/100 · ANALISIS ${mode==='paper'&&entryCandles.length>=36?((TF_LABEL&&TF_LABEL[normalizeTf(chartInterval)])||normalizeTf(chartInterval))+' CLOSED':'CHART TF'}${tickerFresh?' · TICKER LIVE':' · HARGA CANDLE'}`); return true;
+  addTradeMarker('entry',paperPos); renderTradeVisuals(); persist(); syncPaperStateUI(a); log(`PAPER ${allowScaleIn?'AUTO/MANUAL':'MANUAL'} ${side} ${symbol} · ENTRY TAHAP 1/${entryCap} · ${fmtTradeP(p)} · SL ${fmtTradeP(sl)} · profit guard aktif setelah target awal, lalu BE + giveback 20% tanpa TP tetap · SCORE ${a.score.toFixed(0)}/100 · ANALISIS ${mode==='paper'&&entryCandles.length>=36?((TF_LABEL&&TF_LABEL[normalizeTf(chartInterval)])||normalizeTf(chartInterval))+' CLOSED':'CHART TF'}${tickerFresh?' · TICKER LIVE':' · HARGA CANDLE'}`); return true;
 }
 function renderPosition(pnl=0){if(!hasValidPaperPosition()){$('#position').innerHTML='<div class="muted">Tidak ada posisi.</div>';return}let p=paperPos;const pricePairMatches=String(p.symbol||'').toUpperCase()===String(symbol||'').toUpperCase();$('#position').innerHTML=`${(!pricePairMatches&&mode==='paper')?`<div class="warning" style="margin-bottom:7px">PNL DITAHAN · posisi ${p.symbol} / chart ${symbol}. Harga pair berbeda tidak dipakai agar PnL tidak palsu.</div>`:'' }<div class="grid3"><div class="metric"><span class="muted">Side</span><b class="${p.side==='BUY'?'up':'down'}">${p.side} ${p.symbol}</b></div><div class="metric"><span class="muted">Entry</span><b>${fmtTradeP(p.entry)}</b></div><div class="metric"><span class="muted">Qty</span><b>${p.qty.toFixed(6)}</b></div></div><div class="grid3" style="margin-top:7px"><div class="metric"><span class="muted">Margin</span><b>${fmtIDR(p.margin||0)}</b></div><div class="metric"><span class="muted">Leverage</span><b>${Number(p.leverage||1)}x</b></div><div class="metric"><span class="muted">Position Size</span><b>${fmtIDR(p.notional||0)}</b></div></div><div class="grid3" style="margin-top:7px"><div class="metric"><span class="muted">SL</span><b>${fmtTradeP(p.sl)}</b></div><div class="metric"><span class="muted">TP</span><b>${p.autoTrailActive?'TANPA BATAS · TRAILING':fmtTradeP(p.tp)}</b></div><div class="metric"><span class="muted">PnL</span><b class="${pnl>=0?'up':'down'}">${fmtIDR(pnl)}</b></div></div><div class="kv"><span>BE / Partial / Trail</span><b>${p.be?'ON':'OFF'} / ${p.partial?'ON':'OFF'} / ${p.trail?'ON':'OFF'}</b></div><div class="kv"><span>Peak Profit / Giveback</span><b>${fmtIDR(p.peakPnl||0)} / ${PAPER_TRAIL_GIVEBACK_PCT}%${p.autoTrailActive?' · PROFIT RUNNER ON':' · menunggu profit target awal'}</b></div>`}
 
@@ -1238,7 +1239,7 @@ async function submitOrder(side, options={}){
     if(setupTf?.eligible&&setupTf.bias!==sideBias)conflicts.push(`setup ${tfLabel} ${setupTf.bias} (${setupTf.score}/100)`);
     if(oscTf.ready&&oscTf.direction!=='NEUTRAL'&&oscTf.direction!==sideBias&&Math.abs(Number(oscTf.delta)||0)>=2)conflicts.push(`BB/oscillator ${oscTf.direction} (${oscTf.score}/100)`);
     if(conflicts.length){if(automatic){log(`AUTO ENTRY DIBLOKIR · konflik indikator ${tfLabel}: ${conflicts.join(' dan ')} · menunggu arah selaras`);return;}else if(!confirm(`PERINGATAN KONFLUENSI ${tfLabel}\nAnda memilih ${sideBias}, tetapi ${conflicts.join(' dan ')}.\nEntry manual tetap bisa dilakukan, namun risikonya lebih tinggi. Lanjutkan di PAPER?`))return;}
-    const opened=openPaper(side,entryCandidate?.analysis||setupTf?.analysis||null,!automatic);if(opened&&automatic)log(`AUTO PAPER ENTRY · ${side} ${symbol} · ${tfLabel} · SL/TP terpasang`);return
+    const opened=openPaper(side,entryCandidate?.analysis||setupTf?.analysis||null,true);if(opened&&automatic)log(`AUTO PAPER ENTRY · ${side} ${symbol} · ${tfLabel} · SL/TP terpasang`);return
   }
   if(mode!=='demo'&&mode!=='testnet'&&mode!=='live'){alert('Mode trading tidak valid.');return}
   if(mode==='demo'&&hasValidDemoPosition()){alert('Sudah ada posisi aktif. Tutup dulu sebelum entry baru.');return}
