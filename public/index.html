@@ -723,6 +723,7 @@ function redraw(){
    chart.setPosition(paperPos&&hasValidPaperPosition()?paperPos:null);
    chart.setMarkers(tradeMarkers.filter(m=>m&&m.symbol===symbol));
    chart.setSR(sr(candles));
+   chart.setForecast(typeof forecastFromLastWick==='function'?forecastFromLastWick():null);
    chart.fitContent();
   }
  }catch(e){log('Chart render error: '+e.message)}
