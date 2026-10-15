@@ -101,6 +101,51 @@ class CanvasChart {
   line(x1,y1,x2,y2,stroke,w=1,dash=[]){const c=this.ctx;c.beginPath();c.setLineDash(dash);c.strokeStyle=stroke;c.lineWidth=w;c.moveTo(x1,y1);c.lineTo(x2,y2);c.stroke();c.setLineDash([])}
   text(t,x,y,fill='#9aa9bc',size=10,align='left'){const c=this.ctx;c.fillStyle=fill;c.font=`${size}px system-ui`;c.textAlign=align;c.fillText(t,x,y)}
   render(){const c=this.ctx,W=this.host.clientWidth,H=this.host.clientHeight;if(!W||!H)return;c.clearRect(0,0,W,H);c.fillStyle='rgba(5,10,16,.98)';c.fillRect(0,0,W,H);if(!this.candles.length){this.text('Menunggu candle Bybit Futures…',W/2,H/2,'#7f90a6',13,'center');return}const r=this.range(),cw=Math.max(2,(W-88)/r.vis*.62);for(let g=0;g<=5;g++){const y=8+g*(H-34)/5;this.line(48,y,W-40,y,'#132030');const v=r.hi-g*(r.hi-r.lo)/5;this.text(this.fmt(v),W-6,y+3,'#7f90a6',10,'right')}for(let i=0;i<r.cs.length;i++){const idx=r.start+i,q=r.cs[i],x=this.px(idx,r),yo=this.py(q.open,r),yc=this.py(q.close,r),yh=this.py(q.high,r),yl=this.py(q.low,r);const up=q.close>=q.open;this.line(x,yh,x,yl,up?'#19d59a':'#ff5c72',1);c.fillStyle=up?'#19d59a':'#ff5c72';c.fillRect(x-cw/2,Math.min(yo,yc),cw,Math.max(1,Math.abs(yc-yo)));if(this.ema.length){const ei=idx-(this.candles.length-this.ema.length);if(ei>0&&ei<this.ema.length){const prev=this.ema[ei-1];this.line(this.px(idx-1,r),this.py(prev,r),x,this.py(this.ema[ei],r),'#f4c44f',2)}}}
+    // Wick-by-wick annotations: label meaningful upper/lower wicks in context.
+    // A wick is not automatically support/resistance; proximity + reclaim/rejection
+    // are used to distinguish a possible zone reaction from an ordinary wick.
+    {
+      const atr=Number(this.brain?.atr)||Math.max((r.hi-r.lo)*.025,1e-8);
+      const support=Number(this.srLevels?.support), resistance=Number(this.srLevels?.resistance);
+      const wickTags=[];
+      for(let i=0;i<r.cs.length;i++){
+        const q=r.cs[i],idx=r.start+i,op=Number(q.open),cl=Number(q.close),hi=Number(q.high),lo=Number(q.low);
+        const range=Math.max(hi-lo,1e-12),bodyTop=Math.max(op,cl),bodyBottom=Math.min(op,cl);
+        const upper=Math.max(0,hi-bodyTop),lower=Math.max(0,bodyBottom-lo);
+        const prev=this.candles.slice(Math.max(0,idx-5),idx);
+        const prevHigh=prev.length?Math.max(...prev.map(x=>Number(x.high))):NaN;
+        const prevLow=prev.length?Math.min(...prev.map(x=>Number(x.low))):NaN;
+        const nearR=Number.isFinite(resistance)&&resistance>0&&Math.abs(hi-resistance)<=Math.max(atr*.28,hi*.00035);
+        const nearS=Number.isFinite(support)&&support>0&&Math.abs(lo-support)<=Math.max(atr*.28,lo*.00035);
+        const sweepHigh=Number.isFinite(prevHigh)&&hi>prevHigh&&cl<prevHigh;
+        const sweepLow=Number.isFinite(prevLow)&&lo<prevLow&&cl>prevLow;
+        if(upper/range>=.28){
+          let label='SUMBU ATAS';
+          if(sweepHigh)label='SWEEP HIGH';else if(nearR)label='RESISTANCE';else if(upper>lower*1.35)label='TOLAK ATAS';
+          wickTags.push({idx,price:hi,label,color:sweepHigh?'#ffb65c':'#ff8292',above:true,slot:i%3});
+        }
+        if(lower/range>=.28){
+          let label='SUMBU BAWAH';
+          if(sweepLow)label='SWEEP LOW';else if(nearS)label='SUPPORT';else if(lower>upper*1.35)label='TOLAK BAWAH';
+          wickTags.push({idx,price:lo,label,color:sweepLow?'#4de1ff':'#42dfb0',above:false,slot:i%3});
+        }
+      }
+      // Draw all meaningful wick annotations, with alternating offsets to reduce overlap.
+      for(const tag of wickTags){
+        const x=this.px(tag.idx,r),rawY=this.py(tag.price,r),offset=[0,10,20][tag.slot];
+        const label=tag.label,tw=Math.min(78,label.length*4.5+8),bh=13;
+        let bx=x+(tag.slot===1? -tw-3:tag.slot===2?3:-tw/2);
+        bx=Math.max(49,Math.min(W-42-tw,bx));
+        let by=tag.above?rawY-15-offset:rawY+3+offset;
+        by=Math.max(24,Math.min(H-35-bh,by));
+        c.fillStyle='rgba(5,10,16,.88)';c.beginPath();c.roundRect(bx,by,tw,bh,3);c.fill();
+        this.text(label,bx+tw/2,by+9.2,tag.color,7,'center');
+        this.line(x,rawY,x,tag.above?by+bh:by,tag.color,.8,[]);
+      }
+      // Compact legend keeps labels interpretable on mobile.
+      c.fillStyle='rgba(5,10,16,.9)';c.fillRect(54,H-70,Math.min(W-108,255),14);
+      this.text('SUPPORT/RESISTANCE = area reaksi · SWEEP = tembus lalu kembali',60,H-60,'#b7c5d6',7,'left');
+    }
     if(this.srLevels){
       const atr=Number(this.brain?.atr)||Math.max((r.hi-r.lo)*.025,1e-8);
       // Highlight approximate supply/demand POI bands around nearest confirmed levels.
