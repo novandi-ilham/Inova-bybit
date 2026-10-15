@@ -24,3 +24,11 @@ Use `.env.example` and configure `BYBIT_API_KEY`, `BYBIT_API_SECRET`, `BYBIT_BAS
 - Hard paper floating-loss cutoff: 0.20% of account equity per position.
 
 Live trading remains disabled unless deliberately enabled on the server.
+
+
+## V48 — Wick Reading + Chart Scenario Projection
+
+- Chart now reserves space at the right for two dashed conditional paths: `SIMULASI NAIK` and `SIMULASI TURUN`.
+- The active wick-based bias is shown separately as `BIAS`; the paths are scenarios, not guaranteed price predictions.
+- Forecast is recalculated from closed candles and current chart data during redraw.
+- Wicks are interpreted with follow-through, candle close location, EMA slope, momentum, and nearby support/resistance; a wick alone does not trigger a trade.
