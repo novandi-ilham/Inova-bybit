@@ -173,32 +173,32 @@ class CanvasChart {
       for(const [v,color,label] of levels){if(!Number.isFinite(v)||v<=0)continue;const y=this.py(v,r);if(y<8||y>H-26)continue;this.line(48,y,W-40,color,1,label==='SL'?[3,4]:[7,4]);this.text(`${label} ${this.fmt(v)}`,W-45,Math.max(18,y-4),color,9,'right');}
       const banner=`SETUP ${z.side} · ${valid?'TERKONFIRMASI':'MENUNGGU KONFIRMASI'} · SCORE ${Math.round(Number(z.score)||0)}`;c.fillStyle='rgba(5,10,16,.9)';c.fillRect(54,45,Math.min(W-110,Math.max(205,banner.length*5.8)),18);this.text(banner,60,58,valid?col:'#f4c44f',9,'left');
     }
-    // Two conditional forward paths: visual scenarios, never guaranteed predictions.
-    // When a wick forecast exists, reserve chart space on the right for these paths.
+    // One dominant directional bias only; do not draw competing simulated paths.
+    // Direction comes from the wick/structure analysis supplied by the app.
     if(this.forecast&&this.candles.length>=20){
-      const last=this.candles.at(-1),cs=this.candles.slice(-15);
-      const tr=cs.slice(1).map((q,i)=>Math.max(Number(q.high)-Number(q.low),Math.abs(Number(q.high)-Number(cs[i].close)),Math.abs(Number(q.low)-Number(cs[i].close))));
-      const atr=tr.reduce((a,v)=>a+v,0)/Math.max(1,tr.length);
-      const step=Math.max(atr*.38,Math.abs(Number(last.close))*.00015);
-      const x0=this.px(this.candles.length-1,r),right=W-43,room=Math.max(8,right-x0),n=3;
-      const drawPath=(sign,col,label)=>{
-        const pts=[{x:x0,y:this.py(Number(last.close),r)}];
-        for(let k=1;k<=n;k++){
-          const wobble=(k===2?-.12:0)*sign;
-          const price=Number(last.close)+sign*step*k*(1+wobble);
-          pts.push({x:x0+room*k/n,y:this.py(price,r)});
-        }
-        for(let k=1;k<pts.length;k++)this.line(pts[k-1].x,pts[k-1].y,pts[k].x,pts[k].y,col,2,[5,4]);
-        const end=pts.at(-1),yy=Math.max(54,Math.min(H-44,end.y+(sign>0?-8:14)));
-        this.text(label,end.x-3,yy,col,9,'right');
-      };
-      const fdir=String(this.forecast.direction||'');
-      drawPath(1,'#19d59a','SIMULASI NAIK');
-      drawPath(-1,'#ff5c72','SIMULASI TURUN');
-      const col=fdir.includes('NAIK')?'#19d59a':fdir.includes('TURUN')?'#ff5c72':'#f4c44f';
-      const label=`BIAS: ${fdir||'BELUM JELAS'} · SKENARIO, BUKAN KEPASTIAN`;
-      c.fillStyle='rgba(5,10,16,.9)';c.fillRect(54,H-51,Math.min(W-108,label.length*5.4+12),18);
-      this.text(label,60,H-38,col,9,'left');
+      const fdir=String(this.forecast.direction||'').toUpperCase();
+      const isUp=/NAIK|LONG|BUY/.test(fdir), isDown=/TURUN|SHORT|SELL/.test(fdir);
+      const last=this.candles.at(-1),x0=this.px(this.candles.length-1,r),right=W-43;
+      const y0=this.py(Number(last.close),r);
+      if(isUp||isDown){
+        const col=isUp?'#19d59a':'#ff5c72',sign=isUp?-1:1;
+        const visibleRange=Math.max(1,Math.abs(r.max-r.min));
+        const y1=Math.max(42,Math.min(H-56,y0+sign*Math.max(visibleRange*.17,18)));
+        const x1=Math.max(x0+10,right);
+        this.line(x0,y0,x1,y1,col,3,[]);
+        // Arrow head
+        const ang=Math.atan2(y1-y0,x1-x0),head=9;
+        c.fillStyle=col;c.beginPath();c.moveTo(x1,y1);
+        c.lineTo(x1-head*Math.cos(ang-.48),y1-head*Math.sin(ang-.48));
+        c.lineTo(x1-head*Math.cos(ang+.48),y1-head*Math.sin(ang+.48));c.closePath();c.fill();
+        const label=`ARAH UTAMA: ${isUp?'NAIK':'TURUN'}`;
+        c.fillStyle='rgba(5,10,16,.92)';c.fillRect(54,H-51,Math.min(W-108,label.length*5.7+14),18);
+        this.text(label,61,H-38,col,10,'left');
+      }else{
+        const label='ARAH BELUM TERKONFIRMASI · TUNGGU';
+        c.fillStyle='rgba(5,10,16,.92)';c.fillRect(54,H-51,Math.min(W-108,label.length*5.5+14),18);
+        this.text(label,61,H-38,'#f4c44f',9,'left');
+      }
     }
     const last=this.candles.at(-1);if(last)this.text(this.fmt(last.close),W-45,this.py(last.close,r)-5,last.close>=last.open?'#19d59a':'#ff5c72',10,'right');
   }
