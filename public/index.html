@@ -8,7 +8,7 @@
 
 .scan-candidates{display:grid;gap:6px}.scan-candidate{display:grid;grid-template-columns:1fr auto;gap:4px;padding:8px;border:1px solid #253448;border-radius:8px;background:#0b1420;cursor:pointer}.scan-candidate:active{opacity:.8}.scan-candidate b{font-size:11px}.scan-candidate .meta{font-size:10px;color:#9aabba;grid-column:1/-1;line-height:1.35}.scan-candidate .score{font-size:12px}.scan-candidate .rank{font-size:9px;color:#8fa4ba}
 
-/* V46 SIMPLIFIED SIGNAL UI: keep only EMA20 + price action + support/resistance. */
+/* V57 CANDLE CONTEXT: EMA20 + prior candle + swing structure + support/resistance conflict check. */
 .bt-indpanel{display:none!important}
 #wickForecastPanel,#marketIntelligencePanel{display:none!important}
 .bt-indicators .bt-note{max-width:190px}
@@ -928,22 +928,39 @@ function scoreEarlyPair(cs,timeframe=chartInterval){
  const srData=sr(data),brain=marketBrain(data,timeframe);
  const nearSupport=!!(Number(srData.support)>0&&Math.abs(Number(c.close)-Number(srData.support))/atr<.45);
  const nearResistance=!!(Number(srData.resistance)>0&&Math.abs(Number(srData.resistance)-Number(c.close))/atr<.45);
- const eligible=aligned&&fresh&&notLate&&score>=52;
+ // V57: baca konteks candle sebelumnya + candle berjalan, struktur swing dan lokasi S/R.
+ // Candle sesudah candle berjalan belum diketahui; konfirmasi lanjutan harus menunggu candle berikutnya terbentuk.
+ const priorBull=Number(p.close)>Number(p.open),priorBear=Number(p.close)<Number(p.open);
+ const prior2Bull=Number(p2.close)>Number(p2.open),prior2Bear=Number(p2.close)<Number(p2.open);
+ const followLong=bull&&higherClose&&(priorBull||Number(c.close)>Number(p.high));
+ const followShort=bear&&lowerClose&&(priorBear||Number(c.close)<Number(p.low));
+ const oppositeStructure=(bias==='LONG'&&brain?.direction==='SHORT'&&Number(brain?.bearScore||0)>=28&&Number(brain?.bearScore||0)>=Number(brain?.bullScore||0)+10)||(bias==='SHORT'&&brain?.direction==='LONG'&&Number(brain?.bullScore||0)>=28&&Number(brain?.bullScore||0)>=Number(brain?.bearScore||0)+10);
+ const locationConflict=(bias==='LONG'&&nearResistance&&brain?.bearishReject)||(bias==='SHORT'&&nearSupport&&brain?.bullishReject);
+ const twoCandleConflict=(bias==='LONG'&&priorBear&&prior2Bear&&!bull)||(bias==='SHORT'&&priorBull&&prior2Bull&&!bear);
+ // Reward follow-through, penalize one-candle reversals and late entries; don't demand every candle match.
+ if(bias==='LONG'){if(followLong)score+=5;if(priorBear&&!followLong)score-=7;if(nearResistance)score-=8;if(brain?.direction==='SHORT')score-=12;}
+ if(bias==='SHORT'){if(followShort)score+=5;if(priorBull&&!followShort)score-=7;if(nearSupport)score-=8;if(brain?.direction==='LONG')score-=12;}
+ score=Math.max(0,Math.min(100,Math.round(score)));
+ const conflict=oppositeStructure||locationConflict||twoCandleConflict;
+ const eligible=aligned&&fresh&&notLate&&score>=52&&!conflict;
  const reasons=[];
  if(bias==='NEUTRAL')reasons.push('EMA20 belum menentukan arah');
  else if(!aligned)reasons.push('tunggu candle searah EMA20');
  if(!fresh)reasons.push('tunggu price action/candle awal');
  if(!notLate)reasons.push('entry terlambat: harga terlalu jauh dari EMA20');
+ if(oppositeStructure)reasons.push('struktur candle/swing berlawanan — tunggu konfirmasi');
+ else if(locationConflict)reasons.push('wick penolakan di zona S/R — jangan kejar harga');
+ else if(twoCandleConflict)reasons.push('dua candle sebelumnya melawan arah — tunggu follow-through');
  if(score<52)reasons.push(`momentum belum cukup (${score}/100)`);
  return {
    score,bias,analysis:a,brain,structure:brain?.structure,marketEvent:brain?.event,
    brainDirection:brain?.direction,brainScore:brain?.score,earlyScore:score,
-   extension,fresh,eligible,directionGap:100,wickTrendStrength:(bullReject||bearReject)?1:0,
+   extension,fresh,eligible,conflict,followThrough:bias==='LONG'?followLong:bias==='SHORT'?followShort:false,priorCandleDirection:priorBull?'BULLISH':priorBear?'BEARISH':'DOJI',directionGap:100,wickTrendStrength:(bullReject||bearReject)?1:0,
    priorUpper:upper,priorLower:lower,priorWick:bullReject?'REJECTION BAWAH':bearReject?'REJECTION ATAS':'CANDLE PRICE ACTION',
    trendDirection:emaUp?'UPTREND':emaDown?'DOWNTREND':'SIDEWAYS',
    netRR:2,netRewardPct:0,netRiskPct:0,roundTripCostPct:0,signalAgeCandles:0,
    oscDirection:'IGNORED',oscAligned:false,oscConflict:false,maTrend:'IGNORED',nearFib:false,
-   nearSupport,nearResistance,reason:eligible?`${bias} valid · EMA20 + price action searah`:reasons.slice(0,3).join(' · ')||'menunggu konfirmasi',
+   nearSupport,nearResistance,reason:eligible?`${bias} valid · EMA20 + candle sebelumnya + struktur searah`:reasons.slice(0,3).join(' · ')||'menunggu konfirmasi',
    closedTime:c.time,change:0,volume:Number(c.volume)||0,upper,lower,
    volRatio:1
  };
