@@ -677,7 +677,9 @@ function runAutoPaperTrade(){
  const finalScore=Number(String($('#finalSignalScore')?.textContent||'').match(/[0-9]+(?:\.[0-9]+)?/)?.[0]||0);
  const confirmText=String($('#finalSignalConfirm')?.textContent||'').toUpperCase();
  // Forecast/oscillators are informational only; the final EMA20 + price-action signal is authoritative.
- const fallbackSignal=!!(candidate&&finalSide&&finalScore>=52&&candidate.extension<1.75);
+ // V59: never let the visible final signal overwrite a conflicting pair-scanner direction.
+ // A direction disagreement means the candle context is not coherent enough to auto-enter.
+ const fallbackSignal=!!(candidate&&finalSide&&candidate.bias===finalSide&&finalScore>=55&&candidate.extension<1.50);
  if(!candidate){autoDiagnostic('BELUM ADA KANDIDAT','struktur/wick/momentum belum membentuk setup');return;}
  if(!(candidate.eligible||fallbackSignal)){
    autoDiagnostic('KANDIDAT BELUM LOLOS',`score ${Math.round(Number(candidate.score)||0)} · ${candidate.reason||candidate.trendDirection||'menunggu konfirmasi'}`);return;
@@ -692,7 +694,21 @@ function runAutoPaperTrade(){
  // V46: do not let a separate wick-forecast panel veto the primary EMA20 + price-action setup.
  // Recheck direction and displacement at the exact moment of entry.
  const liveMove=(Number(live.close)-Number(live.open))/(Number(candidate.analysis?.A)||1);
- if((side==='BUY'&&liveMove<=0)||(side==='SELL'&&liveMove>=0)){autoDiagnostic('MOMENTUM BELUM SEARAH',`${side} · live move ${liveMove.toFixed(2)} ATR`);return;}if(Math.abs(liveMove)>0.80){autoDiagnostic('GERAK HARGA TERLALU JAUH',`${liveMove.toFixed(2)} ATR · cegah chase`);return;}
+ if((side==='BUY'&&liveMove<=0)||(side==='SELL'&&liveMove>=0)){autoDiagnostic('MOMENTUM BELUM SEARAH',`${side} · live move ${liveMove.toFixed(2)} ATR`);return;}
+ if(Math.abs(liveMove)>0.80){autoDiagnostic('GERAK HARGA TERLALU JAUH',`${liveMove.toFixed(2)} ATR · cegah chase`);return;}
+ // Confirm short-term follow-through on completed candles to avoid selling into a rebound
+ // or buying into a selloff. Use the last two CLOSED candles, not the forming candle alone.
+ const closedForEntry=src.slice(0,-1), c0=closedForEntry.at(-1), c1=closedForEntry.at(-2), c2=closedForEntry.at(-3);
+ if(!c0||!c1||!c2){autoDiagnostic('KONTEKS CANDLE KURANG','butuh 3 candle tertutup');return;}
+ const risingCloses=Number(c0.close)>Number(c1.close)&&Number(c1.close)>Number(c2.close);
+ const fallingCloses=Number(c0.close)<Number(c1.close)&&Number(c1.close)<Number(c2.close);
+ const c0Range=Math.max(Number(c0.high)-Number(c0.low),Number.EPSILON);
+ const c0UpperWick=(Number(c0.high)-Math.max(Number(c0.open),Number(c0.close)))/c0Range;
+ const c0LowerWick=(Math.min(Number(c0.open),Number(c0.close))-Number(c0.low))/c0Range;
+ if(side==='SELL'&&risingCloses&&liveMove>=0){autoDiagnostic('SELL DITAHAN · PANTULAN NAIK','3 close meningkat dan candle berjalan bullish');return;}
+ if(side==='BUY'&&fallingCloses&&liveMove<=0){autoDiagnostic('BUY DITAHAN · TEKANAN TURUN','3 close menurun dan candle berjalan bearish');return;}
+ if(side==='SELL'&&c0UpperWick<0.12&&Number(c0.close)>Number(c0.open)){autoDiagnostic('SELL DITAHAN · BELUM ADA REJECTION','candle tertutup bullish tanpa wick atas yang berarti');return;}
+ if(side==='BUY'&&c0LowerWick<0.12&&Number(c0.close)<Number(c0.open)){autoDiagnostic('BUY DITAHAN · BELUM ADA REJECTION','candle tertutup bearish tanpa wick bawah yang berarti');return;}
  const key=[symbol,tf,live.time,side].join(':');if(key===autoEntryLastKey){autoDiagnostic('SINYAL SUDAH DIPROSES',`${side} ${symbol} · candle sama`,false);return;}
  const guardReasons=guard().filter(r=>!r.includes('sudah ada posisi aktif'));if(hasValidPaperPosition()){const cap=Math.max(1,Math.min(10,Math.floor(Number($('#maxPos')?.value)||5)));if(paperPos.symbol!==symbol||paperPos.side!==(side==='BUY'?'BUY':'SELL')){guardReasons.push('posisi aktif berbeda pair/arah');}else if((Number(paperPos.entryCount)||1)>=cap){guardReasons.push(`batas entry bertahap ${cap} tercapai`);}}if(guardReasons.length){autoDiagnostic('RISK GUARD MENAHAN',guardReasons.slice(0,2).join(' · '));return;}
  autoEntryLastKey=key;autoEntryBusy=true;
