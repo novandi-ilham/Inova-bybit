@@ -146,6 +146,44 @@ class CanvasChart {
       c.fillStyle='rgba(5,10,16,.9)';c.fillRect(54,H-70,Math.min(W-108,255),14);
       this.text('SUPPORT/RESISTANCE = area reaksi · SWEEP = tembus lalu kembali',60,H-60,'#b7c5d6',7,'left');
     }
+    // Automatic Fibonacci retracement overlay from the latest visible swing range.
+    // The 0.50 and 0.618 levels are highlighted as a reaction zone, not a guaranteed entry.
+    {
+      const cs=r.cs;
+      if(cs.length>=12){
+        let hi=-Infinity,lo=Infinity,hiI=0,loI=0;
+        for(let i=0;i<cs.length;i++){
+          const h=Number(cs[i].high),l=Number(cs[i].low);
+          if(Number.isFinite(h)&&h>hi){hi=h;hiI=i;}
+          if(Number.isFinite(l)&&l<lo){lo=l;loI=i;}
+        }
+        const span=hi-lo, mid=(hi+lo)/2;
+        if(Number.isFinite(span)&&span>Math.max(Math.abs(mid)*0.0002,1e-10)){
+          // Anchor direction follows which extreme occurred last in the visible swing.
+          const upMove=loI<hiI;
+          const levels=[
+            {f:0,label:'0.000',strong:false},
+            {f:.236,label:'0.236',strong:false},
+            {f:.382,label:'0.382',strong:false},
+            {f:.5,label:'0.500',strong:true},
+            {f:.618,label:'0.618',strong:true},
+            {f:.786,label:'0.786',strong:false},
+            {f:1,label:'1.000',strong:false}
+          ];
+          for(const lv of levels){
+            const price=upMove?hi-span*lv.f:lo+span*lv.f;
+            const y=this.py(price,r);
+            if(y<8||y>H-28)continue;
+            const col=lv.f===.5?'#e8c66a':lv.f===.618?'#d9a7ff':'#8a9bb055';
+            if(lv.strong){c.fillStyle=lv.f===.5?'rgba(232,198,106,.08)':'rgba(217,167,255,.08)';c.fillRect(48,y-4,W-88,8);}
+            this.line(48,y,W-40,y,col,lv.strong?1.25:.7,lv.strong?[]:[3,5]);
+            this.text(`FIB ${lv.label} ${this.fmt(price)}`,W-45,Math.max(18,Math.min(H-30,y-3)),lv.strong?(lv.f===.5?'#e8c66a':'#d9a7ff'):'#9ba9bb',8,'right');
+          }
+          const anchorA=upMove?lo:hi,anchorB=upMove?hi:lo;
+          this.text(`AUTO FIB · ${upMove?'LOW → HIGH':'HIGH → LOW'} · zona 0.50–0.618`,54,H-82,'#d9c6ef',8,'left');
+        }
+      }
+    }
     if(this.srLevels){
       const atr=Number(this.brain?.atr)||Math.max((r.hi-r.lo)*.025,1e-8);
       // Highlight approximate supply/demand POI bands around nearest confirmed levels.

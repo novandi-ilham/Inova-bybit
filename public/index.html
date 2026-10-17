@@ -286,12 +286,39 @@ function analyzeData(cs){
  long+=vol>=1.15?10:vol>=.8?5:0; short+=vol>=1.15?10:vol>=.8?5:0;
  long+=breakoutLong?20:rejectLong?10:nearSup?5:0; short+=breakoutShort?20:rejectShort?10:nearRes?5:0;
  long+=bull&&bodyPct>=.45?10:0; short+=bear&&bodyPct>=.45?10:0;
+ // Fibonacci pullback context (video method): classify structure first, then prefer entries
+ // on a 0.50–0.618 retracement instead of chasing an already-extended candle.
+ const fibWindow=cs.slice(-50);
+ const fibHigh=Math.max(...fibWindow.map(x=>x.high));
+ const fibLow=Math.min(...fibWindow.map(x=>x.low));
+ const fibRange=Math.max(fibHigh-fibLow, Number.EPSILON);
+ const highIdx=fibWindow.reduce((best,x,i)=>x.high>fibWindow[best].high?i:best,0);
+ const lowIdx=fibWindow.reduce((best,x,i)=>x.low<fibWindow[best].low?i:best,0);
+ const structureUp=(brain.structure==='UPTREND'||(emaSlope>0&&highIdx>lowIdx));
+ const structureDown=(brain.structure==='DOWNTREND'||(emaSlope<0&&lowIdx>highIdx));
+ const fibLongA=fibHigh-fibRange*0.618, fibLongB=fibHigh-fibRange*0.5;
+ const fibShortA=fibLow+fibRange*0.5, fibShortB=fibLow+fibRange*0.618;
+ const fibLongZone=structureUp&&c.close>=fibLongA&&c.close<=fibLongB;
+ const fibShortZone=structureDown&&c.close>=fibShortA&&c.close<=fibShortB;
+ const fibLongConfirmed=fibLongZone&&bull&&momentum>0&&c.close>=p.close;
+ const fibShortConfirmed=fibShortZone&&bear&&momentum<0&&c.close<=p.close;
+ if(fibLongConfirmed) long+=8;
+ if(fibShortConfirmed) short+=8;
+ // Discourage chasing far from the pullback area when the candle is already extended.
+ const longExtended=structureUp&&c.close>fibHigh-fibRange*0.382&&momentum>0.8;
+ const shortExtended=structureDown&&c.close<fibLow+fibRange*0.382&&momentum<-0.8;
+ if(longExtended&&!fibLongZone) long-=8;
+ if(shortExtended&&!fibShortZone) short-=8;
  if(regime==='RANGE'){long-=8;short-=8} if(regime==='EXTREME VOLATILITY'){long-=12;short-=12}
  long=Math.max(0,Math.min(100,long)); short=Math.max(0,Math.min(100,short));
  const score=Math.max(long,short);
  // Direction is score-led, with a small LONG preference. A SHORT must have clearly stronger evidence.
  const bias=long>=short-LONG_PREFERENCE_GAP&&long>0?'LONG':short>long+LONG_PREFERENCE_GAP?'SHORT':bull?'LONG':bear?'SHORT':'NEUTRAL';
  const reasons=[];
+ if(fibLongConfirmed)reasons.push('Fibonacci pullback LONG 0.50–0.618 terkonfirmasi');
+ if(fibShortConfirmed)reasons.push('Fibonacci pullback SHORT 0.50–0.618 terkonfirmasi');
+ if(longExtended&&!fibLongZone)reasons.push('hindari mengejar LONG; harga sudah menjauh dari zona retracement');
+ if(shortExtended&&!fibShortZone)reasons.push('hindari mengejar SHORT; harga sudah menjauh dari zona retracement');
  if(regime==='EXTREME VOLATILITY')reasons.push('volatilitas ekstrem');
  if(Math.abs(momentum)<.20)reasons.push('momentum sangat lemah');
  if(vol<.65)reasons.push('volume relatif rendah');
@@ -308,7 +335,7 @@ function analyzeData(cs){
  const shortApproved=shortSetup&&short>long+LONG_PREFERENCE_GAP;
  const allowed=regime!=='EXTREME VOLATILITY'&&((bias==='LONG'&&longSetup)||(bias==='SHORT'&&shortApproved));
  const slDist=Math.max(A*.8,c.close*.004),rr=2,tpDist=slDist*rr;
- return {c,e,A,support,resistance,body,range,wU,wL,bodyPct,bull,bear,trend,momentum,vol,breakoutLong,breakoutShort,rejectLong,rejectShort,nearRes,nearSup,emaSlope,regime,longScore:long,shortScore:short,score,bias,reasons,allowed,slDist,tpDist,rr,marketBrain:brain};
+ return {c,e,A,support,resistance,body,range,wU,wL,bodyPct,bull,bear,trend,momentum,vol,breakoutLong,breakoutShort,rejectLong,rejectShort,nearRes,nearSup,emaSlope,regime,longScore:long,shortScore:short,score,bias,reasons,allowed,slDist,tpDist,rr,marketBrain:brain,fibonacci:{high:fibHigh,low:fibLow,range:fibRange,longZone:[fibLongA,fibLongB],shortZone:[fibShortA,fibShortB],longConfirmed:fibLongConfirmed,shortConfirmed:fibShortConfirmed,longExtended,shortExtended,structureUp,structureDown}};
 }
 function analyze(){return analyzeData(candles)}
 function timeSignalData(){
