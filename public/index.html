@@ -681,6 +681,10 @@ function runAutoPaperTrade(){
  // A direction disagreement means the candle context is not coherent enough to auto-enter.
  const fallbackSignal=!!(candidate&&finalSide&&candidate.bias===finalSide&&finalScore>=55&&candidate.extension<1.50);
  if(!candidate){autoDiagnostic('BELUM ADA KANDIDAT','struktur/wick/momentum belum membentuk setup');return;}
+ // V62: one authoritative direction. Never auto-enter from a scanner candidate
+ // while Final Signal says WAIT or points the other way.
+ if(!finalSide){autoDiagnostic('FINAL SIGNAL WAIT','scanner hanya kandidat; entry ditahan sampai sinyal final BUY/SELL');return;}
+ if(candidate.bias!==finalSide){autoDiagnostic('KONFLIK ARAH ENTRY',`Final Signal ${finalSide} ≠ scanner ${candidate.bias||'NEUTRAL'}; menunggu konfirmasi searah`);return;}
  if(!(candidate.eligible||fallbackSignal)){
    autoDiagnostic('KANDIDAT BELUM LOLOS',`score ${Math.round(Number(candidate.score)||0)} · ${candidate.reason||candidate.trendDirection||'menunggu konfirmasi'}`);return;
  }
@@ -1273,13 +1277,13 @@ async function submitOrder(side, options={}){
     const entryTfCandles=Array.isArray(entryCandles)&&entryCandles.length>=36?entryCandles:candles;
     const candidate=entryTfCandles.length>=36?scoreEarlyPair(entryTfCandles):null;
     if(!currentAnalysis||currentAnalysis.regime==='EXTREME VOLATILITY'){alert(`ENTRY DITAHAN · ${tfLabel}\nData analisis belum siap atau volatilitas ekstrem. Tunggu kondisi lebih stabil.`);log(`ENTRY BLOCKED · ${side} · analysis/risk filter · ${tfLabel}`);return}
-    // Final Signal is the authoritative entry decision. Do not hard-block a valid
-    // displayed BUY/SELL because a second candidate scorer disagrees on a candle edge.
-    if(!scaleInSameSide&&!automaticCandidate&&!badgeText.startsWith(expectedSignal)){alert(`ENTRY DITAHAN · ${tfLabel}\nFinal Signal saat ini: ${badgeText||'WAIT'}. Posisi baru ${side} tetap menunggu sinyal yang sesuai.`);log(`ENTRY BLOCKED · ${side} · Final Signal ${badgeText||'WAIT'} · ${tfLabel}`);return}
+    // V62: do not permit a manual override to bypass a conflicting entry model.
+    // Scale-in is also required to match the currently displayed final direction.
+    if(!badgeText.startsWith(expectedSignal)){alert(`ENTRY DITAHAN · ${tfLabel}\nFinal Signal saat ini: ${badgeText||'WAIT'}. Entry ${side} tidak boleh dibuka sampai sinyal final searah.`);log(`ENTRY BLOCKED · ${side} · Final Signal ${badgeText||'WAIT'} · ${tfLabel}`);return}
     if(automaticCandidate&&(!automaticCandidate.eligible||automaticCandidate.bias!==(side==='BUY'?'LONG':'SHORT')||!automaticCandidate.fresh||automaticCandidate.extension>=1.60)){log(`AUTO ENTRY DITAHAN · live candidate tidak valid · ${automaticCandidate.reason||tfLabel}`);return}
     const entryCandidate=automaticCandidate||candidate;
     const candidateMismatch=!entryCandidate?.eligible||entryCandidate.bias!==(side==='BUY'?'LONG':'SHORT');
-    if(candidateMismatch&&!scaleInSameSide){const why=entryCandidate?.reason||'skor kandidat belum tersedia';if(automatic){log(`AUTO ENTRY DITAHAN · ${side} · kandidat belum lolos: ${why} · ${tfLabel}`);return;}if(!confirm(`PERINGATAN SETUP · ${tfLabel}\nFinal Signal menunjukkan ${side}, tetapi pemeriksa kandidat terpisah belum mengonfirmasi (${why}).\nLanjutkan PAPER secara manual?`)){log(`ENTRY CANCELLED · ${side} · candidate mismatch · ${tfLabel}`);return;}log(`ENTRY OVERRIDE CONFIRMED · ${side} · Final Signal selaras; candidate mismatch: ${why} · ${tfLabel}`)}
+    if(candidateMismatch&&!scaleInSameSide){const why=entryCandidate?.reason||'skor kandidat belum tersedia';log(`ENTRY DITAHAN · ${side} · kandidat tidak mengonfirmasi sinyal final: ${why} · ${tfLabel}`);if(!automatic)alert(`ENTRY DITAHAN · ${tfLabel}\nSinyal final ${side} belum dikonfirmasi scanner (${why}). Tunggu setup yang selaras.`);return}
     const dataLabel=String($('#wickDataStatus')?.textContent||'');
     // V40: use actual data timestamps, not the display label 'LIVE'. REST Recovery is
     // a valid price source when its ticker sync is recent; the previous check rejected
