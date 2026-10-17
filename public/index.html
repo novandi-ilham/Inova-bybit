@@ -263,6 +263,35 @@ function marketBrain(cs, timeframe=chartInterval){
  const reasons=[];if(structure!=='RANGE / BUILDING')reasons.push(structure);if(event!=='NONE')reasons.push(event);if(bullishReject)reasons.push('bullish wick rejection');if(bearishReject)reasons.push('bearish wick rejection');if(nearSupport)reasons.push('near support');if(nearResistance)reasons.push('near resistance');
  return {ready:true,direction,score:Math.max(bull,bear),bullScore:bull,bearScore:bear,structure,event,hh,hl,lh,ll,bosUp,bosDown,chochUp,chochDown,bullishReject,bearishReject,sweepLow,sweepHigh,nearSupport,nearResistance,support:levels.support,resistance:levels.resistance,lastHigh,lastLow,atr:atrNow,slope,upperWick:upper/range,lowerWick:lower/range,previousUpperWick:prevUpper/prevRange,previousLowerWick:prevLower/prevRange,reason:reasons.join(' · ')||'price action mixed'};
 }
+function confirmedFibSwing(cs){
+ // Use confirmed local pivots from CLOSED candles, not unrelated max/min extremes
+ // across a fixed 50-candle window. Two candles on each side confirm a pivot.
+ const d=(Array.isArray(cs)?cs:[]).filter(x=>[x.open,x.high,x.low,x.close].every(v=>Number.isFinite(Number(v))));
+ const closed=d.length>2?d.slice(0,-1):d; // last candle may still be forming
+ if(closed.length<12)return null;
+ const start=Math.max(2,closed.length-90), piv=[];
+ for(let i=start;i<closed.length-2;i++){
+  const x=closed[i], l=closed[i-1],ll=closed[i-2],r=closed[i+1],rr=closed[i+2];
+  const isHigh=+x.high>=+l.high&&+x.high>+ll.high&&+x.high>=+r.high&&+x.high>+rr.high;
+  const isLow=+x.low<=+l.low&&+x.low<+ll.low&&+x.low<=+r.low&&+x.low<+rr.low;
+  if(isHigh)piv.push({type:'H',price:+x.high,index:i,time:x.time});
+  if(isLow)piv.push({type:'L',price:+x.low,index:i,time:x.time});
+ }
+ // If a wide candle qualifies as both, retain only its more extreme pivot by candle direction.
+ const clean=[]; for(const q of piv.sort((a,b)=>a.index-b.index)){
+  const prev=clean.at(-1);
+  if(!prev||prev.type!==q.type)clean.push(q);
+  else if((q.type==='H'&&q.price>prev.price)||(q.type==='L'&&q.price<prev.price))clean[clean.length-1]=q;
+ }
+ if(clean.length<2)return null;
+ // Prefer the latest completed impulse leg, i.e. the latest two opposite pivots.
+ const b=clean.at(-1),a=[...clean].slice(0,-1).reverse().find(x=>x.type!==b.type);
+ if(!a||a.index>=b.index)return null;
+ const low=Math.min(a.price,b.price),high=Math.max(a.price,b.price),range=high-low;
+ if(!(range>0))return null;
+ const direction=a.type==='L'&&b.type==='H'?'UP':'DOWN';
+ return {low,high,range,direction,startIndex:a.index,endIndex:b.index,anchors:[a,b],closedCount:closed.length};
+}
 function analyzeData(cs){
  if(cs.length<30)return null;
  const c=cs.at(-1),p=cs.at(-2),cl=cs.map(x=>x.close),es=ema(cl),e=es.at(-1),A=atr(cs),{support,resistance}=sr(cs),brain=marketBrain(cs);
@@ -288,14 +317,15 @@ function analyzeData(cs){
  long+=bull&&bodyPct>=.45?10:0; short+=bear&&bodyPct>=.45?10:0;
  // Fibonacci pullback context (video method): classify structure first, then prefer entries
  // on a 0.50–0.618 retracement instead of chasing an already-extended candle.
- const fibWindow=cs.slice(-50);
- const fibHigh=Math.max(...fibWindow.map(x=>x.high));
- const fibLow=Math.min(...fibWindow.map(x=>x.low));
+ const fibSwing=confirmedFibSwing(cs);
+ const fibHigh=fibSwing?.high??Math.max(...cs.slice(-20).map(x=>+x.high));
+ const fibLow=fibSwing?.low??Math.min(...cs.slice(-20).map(x=>+x.low));
  const fibRange=Math.max(fibHigh-fibLow, Number.EPSILON);
- const highIdx=fibWindow.reduce((best,x,i)=>x.high>fibWindow[best].high?i:best,0);
- const lowIdx=fibWindow.reduce((best,x,i)=>x.low<fibWindow[best].low?i:best,0);
- const structureUp=(brain.structure==='UPTREND'||(emaSlope>0&&highIdx>lowIdx));
- const structureDown=(brain.structure==='DOWNTREND'||(emaSlope<0&&lowIdx>highIdx));
+ // A retracement setup is valid only when the confirmed impulse direction agrees
+ // with market structure and EMA slope. This prevents mixing an old swing high
+ // with an unrelated newer low.
+ const structureUp=!!fibSwing&&fibSwing.direction==='UP'&&(brain.structure==='UPTREND'||brain.structure==='BULLISH STRUCTURE')&&emaSlope>0;
+ const structureDown=!!fibSwing&&fibSwing.direction==='DOWN'&&(brain.structure==='DOWNTREND'||brain.structure==='BEARISH STRUCTURE')&&emaSlope<0;
  const fibLongA=fibHigh-fibRange*0.618, fibLongB=fibHigh-fibRange*0.5;
  const fibShortA=fibLow+fibRange*0.5, fibShortB=fibLow+fibRange*0.618;
  const fibLongZone=structureUp&&c.close>=fibLongA&&c.close<=fibLongB;
@@ -335,7 +365,7 @@ function analyzeData(cs){
  const shortApproved=shortSetup&&short>long+LONG_PREFERENCE_GAP;
  const allowed=regime!=='EXTREME VOLATILITY'&&((bias==='LONG'&&longSetup)||(bias==='SHORT'&&shortApproved));
  const slDist=Math.max(A*.8,c.close*.004),rr=2,tpDist=slDist*rr;
- return {c,e,A,support,resistance,body,range,wU,wL,bodyPct,bull,bear,trend,momentum,vol,breakoutLong,breakoutShort,rejectLong,rejectShort,nearRes,nearSup,emaSlope,regime,longScore:long,shortScore:short,score,bias,reasons,allowed,slDist,tpDist,rr,marketBrain:brain,fibonacci:{high:fibHigh,low:fibLow,range:fibRange,longZone:[fibLongA,fibLongB],shortZone:[fibShortA,fibShortB],longConfirmed:fibLongConfirmed,shortConfirmed:fibShortConfirmed,longExtended,shortExtended,structureUp,structureDown}};
+ return {c,e,A,support,resistance,body,range,wU,wL,bodyPct,bull,bear,trend,momentum,vol,breakoutLong,breakoutShort,rejectLong,rejectShort,nearRes,nearSup,emaSlope,regime,longScore:long,shortScore:short,score,bias,reasons,allowed,slDist,tpDist,rr,marketBrain:brain,fibonacci:{high:fibHigh,low:fibLow,range:fibRange,direction:fibSwing?.direction||'UNCONFIRMED',anchors:fibSwing?.anchors||[],longZone:[fibLongA,fibLongB],shortZone:[fibShortA,fibShortB],longConfirmed:fibLongConfirmed,shortConfirmed:fibShortConfirmed,longExtended,shortExtended,structureUp,structureDown}};
 }
 function analyze(){return analyzeData(candles)}
 function timeSignalData(){

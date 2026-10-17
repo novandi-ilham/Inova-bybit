@@ -146,42 +146,45 @@ class CanvasChart {
       c.fillStyle='rgba(5,10,16,.9)';c.fillRect(54,H-70,Math.min(W-108,255),14);
       this.text('SUPPORT/RESISTANCE = area reaksi · SWEEP = tembus lalu kembali',60,H-60,'#b7c5d6',7,'left');
     }
-    // Automatic Fibonacci retracement overlay from the latest visible swing range.
-    // The 0.50 and 0.618 levels are highlighted as a reaction zone, not a guaranteed entry.
+    // Fibonacci uses the latest confirmed alternating pivot pair, not independent
+    // highest-high/lowest-low in the viewport (which can produce a false leg).
     {
       const cs=r.cs;
       if(cs.length>=12){
-        let hi=-Infinity,lo=Infinity,hiI=0,loI=0;
-        for(let i=0;i<cs.length;i++){
-          const h=Number(cs[i].high),l=Number(cs[i].low);
-          if(Number.isFinite(h)&&h>hi){hi=h;hiI=i;}
-          if(Number.isFinite(l)&&l<lo){lo=l;loI=i;}
+        const piv=[];
+        for(let i=2;i<cs.length-2;i++){
+          const q=cs[i],l=cs[i-1],ll=cs[i-2],rr=cs[i+2],rr1=cs[i+1];
+          const isH=q.high>=l.high&&q.high>ll.high&&q.high>=rr1.high&&q.high>rr.high;
+          const isL=q.low<=l.low&&q.low<ll.low&&q.low<=rr1.low&&q.low<rr.low;
+          if(isH)piv.push({type:'H',price:+q.high,index:i});
+          if(isL)piv.push({type:'L',price:+q.low,index:i});
         }
-        const span=hi-lo, mid=(hi+lo)/2;
-        if(Number.isFinite(span)&&span>Math.max(Math.abs(mid)*0.0002,1e-10)){
-          // Anchor direction follows which extreme occurred last in the visible swing.
-          const upMove=loI<hiI;
-          const levels=[
-            {f:0,label:'0.000',strong:false},
-            {f:.236,label:'0.236',strong:false},
-            {f:.382,label:'0.382',strong:false},
-            {f:.5,label:'0.500',strong:true},
-            {f:.618,label:'0.618',strong:true},
-            {f:.786,label:'0.786',strong:false},
-            {f:1,label:'1.000',strong:false}
-          ];
-          for(const lv of levels){
-            const price=upMove?hi-span*lv.f:lo+span*lv.f;
-            const y=this.py(price,r);
-            if(y<8||y>H-28)continue;
-            const col=lv.f===.5?'#e8c66a':lv.f===.618?'#d9a7ff':'#8a9bb055';
-            if(lv.strong){c.fillStyle=lv.f===.5?'rgba(232,198,106,.08)':'rgba(217,167,255,.08)';c.fillRect(48,y-4,W-88,8);}
-            this.line(48,y,W-40,y,col,lv.strong?1.25:.7,lv.strong?[]:[3,5]);
-            this.text(`FIB ${lv.label} ${this.fmt(price)}`,W-45,Math.max(18,Math.min(H-30,y-3)),lv.strong?(lv.f===.5?'#e8c66a':'#d9a7ff'):'#9ba9bb',8,'right');
+        const clean=[];
+        for(const q of piv.sort((a,b)=>a.index-b.index)){
+          const prev=clean.at(-1);
+          if(!prev||prev.type!==q.type)clean.push(q);
+          else if((q.type==='H'&&q.price>prev.price)||(q.type==='L'&&q.price<prev.price))clean[clean.length-1]=q;
+        }
+        const b=clean.at(-1),a=b?[...clean].slice(0,-1).reverse().find(x=>x.type!==b.type):null;
+        if(a&&b&&a.index<b.index){
+          const lo=Math.min(a.price,b.price),hi=Math.max(a.price,b.price),span=hi-lo;
+          const upMove=a.type==='L'&&b.type==='H';
+          if(span>Math.max(Math.abs((hi+lo)/2)*0.0001,1e-10)){
+            const levels=[{f:0,label:'0.000'},{f:.236,label:'0.236'},{f:.382,label:'0.382'},{f:.5,label:'0.500',strong:true},{f:.618,label:'0.618',strong:true},{f:.786,label:'0.786'},{f:1,label:'1.000'}];
+            // Draw the swing leg itself so users can verify which two pivots anchor Fib.
+            const ax=this.px(r.start+a.index,r),bx=this.px(r.start+b.index,r);
+            this.line(ax,this.py(a.price,r),bx,this.py(b.price,r),upMove?'#19d59a':'#ff5c72',1,[4,4]);
+            for(const lv of levels){
+              const price=upMove?hi-span*lv.f:lo+span*lv.f,y=this.py(price,r);
+              if(y<8||y>H-28)continue;
+              const col=lv.f===.5?'#e8c66a':lv.f===.618?'#d9a7ff':'#8a9bb055';
+              if(lv.strong){c.fillStyle=lv.f===.5?'rgba(232,198,106,.08)':'rgba(217,167,255,.08)';c.fillRect(48,y-3,W-88,6);}
+              this.line(48,y,W-40,y,col,lv.strong?1.25:.7,lv.strong?[]:[3,5]);
+              this.text(`FIB ${lv.label} ${this.fmt(price)}`,W-45,Math.max(18,Math.min(H-30,y-3)),lv.strong?(lv.f===.5?'#e8c66a':'#d9a7ff'):'#9ba9bb',8,'right');
+            }
+            this.text(`AUTO FIB · ${upMove?'LOW → HIGH':'HIGH → LOW'} · PIVOT TERKONFIRMASI · 0.50–0.618`,54,H-82,'#d9c6ef',8,'left');
           }
-          const anchorA=upMove?lo:hi,anchorB=upMove?hi:lo;
-          this.text(`AUTO FIB · ${upMove?'LOW → HIGH':'HIGH → LOW'} · zona 0.50–0.618`,54,H-82,'#d9c6ef',8,'left');
-        }
+        }else this.text('AUTO FIB · menunggu 2 pivot swing terkonfirmasi',54,H-82,'#9ba9bb',8,'left');
       }
     }
     if(this.srLevels){
