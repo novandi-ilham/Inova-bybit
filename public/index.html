@@ -942,8 +942,12 @@ function scoreEarlyPair(cs,timeframe=chartInterval){
  }
  score=Math.max(0,Math.min(100,Math.round(score-(extension>.9?(extension-.9)*12:0))));
  const srData=sr(data),brain=marketBrain(data,timeframe);
- const nearSupport=!!(Number(srData.support)>0&&Math.abs(Number(c.close)-Number(srData.support))/atr<.45);
- const nearResistance=!!(Number(srData.resistance)>0&&Math.abs(Number(srData.resistance)-Number(c.close))/atr<.45);
+ // Use a wider ATR buffer around key levels: a short opened just above support
+ // has poor downside room and is vulnerable to a bounce.
+ const supportGap=Number(srData.support)>0?(Number(c.close)-Number(srData.support))/atr:Infinity;
+ const resistanceGap=Number(srData.resistance)>0?(Number(srData.resistance)-Number(c.close))/atr:Infinity;
+ const nearSupport=Number.isFinite(supportGap)&&supportGap>=0&&supportGap<.70;
+ const nearResistance=Number.isFinite(resistanceGap)&&resistanceGap>=0&&resistanceGap<.70;
  // V57: baca konteks candle sebelumnya + candle berjalan, struktur swing dan lokasi S/R.
  // Candle sesudah candle berjalan belum diketahui; konfirmasi lanjutan harus menunggu candle berikutnya terbentuk.
  const priorBull=Number(p.close)>Number(p.open),priorBear=Number(p.close)<Number(p.open);
@@ -951,13 +955,17 @@ function scoreEarlyPair(cs,timeframe=chartInterval){
  const followLong=bull&&higherClose&&(priorBull||Number(c.close)>Number(p.high));
  const followShort=bear&&lowerClose&&(priorBear||Number(c.close)<Number(p.low));
  const oppositeStructure=(bias==='LONG'&&brain?.direction==='SHORT'&&Number(brain?.bearScore||0)>=28&&Number(brain?.bearScore||0)>=Number(brain?.bullScore||0)+10)||(bias==='SHORT'&&brain?.direction==='LONG'&&Number(brain?.bullScore||0)>=28&&Number(brain?.bullScore||0)>=Number(brain?.bearScore||0)+10);
- const locationConflict=(bias==='LONG'&&nearResistance&&brain?.bearishReject)||(bias==='SHORT'&&nearSupport&&brain?.bullishReject);
+ // Block late shorts into nearby support even without a perfect bullish-rejection
+ // pattern; require room for price to move before considering a short entry.
+ const locationConflict=(bias==='LONG'&&nearResistance&&brain?.bearishReject)||(bias==='SHORT'&&nearSupport);
+ const bullishBounceRisk=bias==='SHORT'&&(lower>=.38&&Number(c.close)>Number(c.low)+range*.62);
+
  const twoCandleConflict=(bias==='LONG'&&priorBear&&prior2Bear&&!bull)||(bias==='SHORT'&&priorBull&&prior2Bull&&!bear);
  // Reward follow-through, penalize one-candle reversals and late entries; don't demand every candle match.
  if(bias==='LONG'){if(followLong)score+=5;if(priorBear&&!followLong)score-=7;if(nearResistance)score-=8;if(brain?.direction==='SHORT')score-=12;}
  if(bias==='SHORT'){if(followShort)score+=5;if(priorBull&&!followShort)score-=7;if(nearSupport)score-=8;if(brain?.direction==='LONG')score-=12;}
  score=Math.max(0,Math.min(100,Math.round(score)));
- const conflict=oppositeStructure||locationConflict||twoCandleConflict;
+ const conflict=oppositeStructure||locationConflict||twoCandleConflict||bullishBounceRisk;
  const eligible=aligned&&fresh&&notLate&&score>=52&&!conflict;
  const reasons=[];
  if(bias==='NEUTRAL')reasons.push('EMA20 belum menentukan arah');
@@ -965,7 +973,8 @@ function scoreEarlyPair(cs,timeframe=chartInterval){
  if(!fresh)reasons.push('tunggu price action/candle awal');
  if(!notLate)reasons.push('entry terlambat: harga terlalu jauh dari EMA20');
  if(oppositeStructure)reasons.push('struktur candle/swing berlawanan — tunggu konfirmasi');
- else if(locationConflict)reasons.push('wick penolakan di zona S/R — jangan kejar harga');
+ else if(locationConflict)reasons.push(bias==='SHORT'?'dekat support — potensi pantulan, jangan kejar SELL':'wick penolakan di zona S/R — jangan kejar harga');
+ else if(bullishBounceRisk)reasons.push('sumbu bawah panjang + close pulih — risiko pantulan melawan SELL');
  else if(twoCandleConflict)reasons.push('dua candle sebelumnya melawan arah — tunggu follow-through');
  if(score<52)reasons.push(`momentum belum cukup (${score}/100)`);
  return {
