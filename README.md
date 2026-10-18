@@ -32,3 +32,11 @@ Live trading remains disabled unless deliberately enabled on the server.
 - The active wick-based bias is shown separately as `BIAS`; the paths are scenarios, not guaranteed price predictions.
 - Forecast is recalculated from closed candles and current chart data during redraw.
 - Wicks are interpreted with follow-through, candle close location, EMA slope, momentum, and nearby support/resistance; a wick alone does not trigger a trade.
+
+
+## V71 — Fokus Bybit PAPER
+
+- Menghapus koneksi XAUUSD/Twelve Data agar deployment hanya membutuhkan konfigurasi Bybit yang sudah ada.
+- `/paper-audit.html` hanya menguji data candle publik Bybit Linear, sampai 1.000 candle per permintaan.
+- Audit tetap simulasi historis terpisah; hasilnya tidak boleh dianggap sebagai hasil strategi live sebelum aturan entry/exit yang sama diuji out-of-sample.
+- Live trading tetap terkunci secara default melalui `ALLOW_LIVE_TRADING=false`.
