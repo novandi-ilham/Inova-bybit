@@ -40,3 +40,8 @@ Live trading remains disabled unless deliberately enabled on the server.
 - `/paper-audit.html` hanya menguji data candle publik Bybit Linear, sampai 1.000 candle per permintaan.
 - Audit tetap simulasi historis terpisah; hasilnya tidak boleh dianggap sebagai hasil strategi live sebelum aturan entry/exit yang sama diuji out-of-sample.
 - Live trading tetap terkunci secara default melalui `ALLOW_LIVE_TRADING=false`.
+
+
+## V72 — Entry Lock / Quarantine UI Fix
+
+Fixed the invalid-history notice so the acknowledgement button remains visible. Quarantined legacy transactions remain separate from PAPER balance/performance; the user must acknowledge the quarantine and separately unlock entry after checking risk controls. See `README-V72-ENTRY-LOCK-QUARANTINE-FIX.md`.
