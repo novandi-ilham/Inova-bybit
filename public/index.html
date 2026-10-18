@@ -656,7 +656,7 @@ function renderFinalSignal(){
   checks.push(`${scoreOk?'✓':'…'} Skor price action ${Math.round(score)}/100 (indikatif, bukan probabilitas profit).`);
   checks.push(`${setupReady?'✓':'✕'} EMA20 + price action: EMA ${Number.isFinite(emaNow)?emaNow.toPrecision(6):'belum tersedia'} · tren ${emaBias} · candle/struktur ${lessonBias} · ${setupReady?'arah selaras':'arah belum selaras'}.`);
   checks.push(`Support ${Number(lessonPA.support||0).toPrecision(6)} · Resistance ${Number(lessonPA.resistance||0).toPrecision(6)} · ${lessonPA.notes.join('; ')}`);
-  checks.push(`Forecast/oscillator ${forecastSide||'belum tersedia'} hanya informasi; tidak ikut membalikkan sinyal utama.`);
+  checks.push(`Konfirmasi forecast/wick: ${forecastSide||'belum tersedia'} · ${forecastSide&&forecastSide===bias?'SELARAS':'BERLAWANAN / BELUM TERKONFIRMASI'}; konflik arah menahan sinyal final.`);
   const reasons=Array.isArray(a.reasons)?a.reasons:[];
   if(reasons.length)checks.push(`Faktor yang perlu diperiksa: ${reasons.slice(0,4).join('; ')}`);
   if(!dataFresh)why.push(isRecovery?'Data REST recovery sudah usang; tunggu pembaruan data':'Status koneksi belum LIVE atau REST belum segar');
@@ -664,8 +664,11 @@ function renderFinalSignal(){
   // Score is display-only and must not block a wick+trend setup.
   if(!setupReady)why.push(scoredSetup?.reason||'Setup momentum awal belum memenuhi filter');
   if(!setupReady)why.push('EMA20 dan price action belum searah');
-  // Other indicators are informational only; they cannot veto or reverse this primary signal.
-  if(dataFresh&&scoreOk&&setupReady&&a.regime!=='EXTREME VOLATILITY')signal=bias==='LONG'?'BUY':'SELL';
+  // V69 conflict guard: a directional forecast/wick conflict must not coexist with an actionable final BUY/SELL.
+  // This prevents the UI from showing BUY while its own forecast says SHORT (or vice versa).
+  const directionConfirmed=!!forecastSide&&forecastSide===bias;
+  if(!directionConfirmed)why.push(`Konflik arah: forecast ${forecastSide||'belum tersedia'} vs setup ${bias}; tunggu konfirmasi searah`);
+  if(dataFresh&&scoreOk&&setupReady&&directionConfirmed&&a.regime!=='EXTREME VOLATILITY')signal=bias==='LONG'?'BUY':'SELL';
  }
  badge.textContent=signal==='BUY'?(aligned?'BUY ▲ · LONG':'BUY ▲ · LONG · CEK RISIKO'):signal==='SELL'?(aligned?'SELL ▼ · SHORT':'SELL ▼ · SHORT · CEK RISIKO'):'WAIT · JANGAN ENTRY';
  badge.style.color=signal==='BUY'?'#19d59a':signal==='SELL'?'#ff657a':'#f4b942';
@@ -676,7 +679,7 @@ function renderFinalSignal(){
  if(oscEl)oscEl.title='Panel oscillator hanya informasi dan tidak menentukan atau membatalkan sinyal utama.';
  $('#finalSignalConfirm').textContent=forecastSide?`${forecastSide} · ${aligned?'SELARAS':'BERLAWANAN'}`:'BELUM ADA';
  $('#finalSignalConfirm').style.color=aligned?'#19d59a':'#f4b942';
- reason.textContent=(signal==='BUY'||signal==='SELL')?`Data segar dan momentum awal ${bias} memenuhi filter anti-chase. ${aligned?`Forecast ${tfLabel} selaras.`:'PERINGATAN: forecast tidak selaras/tersedia; sinyal lebih berisiko.'} BB/oscillator: ${osc.ready?osc.bb+' · '+osc.direction+' · '+osc.detail:osc.text}. Tetap verifikasi SL/risiko.`:(why.join(' · ')||`Menunggu konfirmasi ${tfLabel}.`)+(osc.ready?` · BB/oscillator: ${osc.bb} · ${osc.direction} · ${osc.detail}`:'');
+ reason.textContent=(signal==='BUY'||signal==='SELL')?`Data segar dan momentum awal ${bias} memenuhi filter anti-chase. Forecast ${tfLabel} selaras. BB/oscillator: ${osc.ready?osc.bb+' · '+osc.direction+' · '+osc.detail:osc.text}. Tetap verifikasi SL/risiko.`:(why.join(' · ')||`Menunggu konfirmasi ${tfLabel}.`)+(osc.ready?` · BB/oscillator: ${osc.bb} · ${osc.direction} · ${osc.detail}`:'');
  const checkEl=$('#finalSignalChecks');if(checkEl){checkEl.innerHTML=checks.map(x=>`<div>${x.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>`).join('');checkEl.style.borderColor=signal==='WAIT'?'#6c5425':'#1e6b52';}
  const posEl=$('#finalSignalPosition');if(posEl){if(position)posEl.textContent=`Posisi aktif: ${position.side||position.positionSide||'TERBUKA'} ${position.symbol||symbol}. Sinyal ini tidak otomatis menutup atau membalik posisi.`;else posEl.textContent='Tidak ada posisi aktif.';}
 }
